@@ -10,10 +10,30 @@ import tempfile
 import time
 import typing as t
 import uuid
+from functools import cached_property
 from pathlib import Path
 
 import httpx
 from rapidfuzz import fuzz, process
+
+from .types import (
+    FolderEntry,
+    FolderRecord,
+    GpgKeyRecord,
+    JwtPayload,
+    LoginTokens,
+    MetadataKeyRecord,
+    PassboltApiResponse,
+    PasswordEntry,
+    RefreshTokens,
+    ResourceRecord,
+    ResourceTypeRecord,
+    SearchResultEntry,
+    SecretRecord,
+    SessionData,
+    SessionValidation,
+    Tokens,
+)
 
 
 def _configure_logging() -> logging.Logger:
@@ -41,82 +61,23 @@ def _configure_logging() -> logging.Logger:
 LOGGER = _configure_logging()
 
 
-class PasswordEntry(t.TypedDict):
-    id: str
-    name: str | None
-    username: str | None
-    uri: str | None
-    folder: str | None
-
-
-class SearchResultEntry(t.TypedDict):
-    score: int
-    id: str
-    name: str | None
-    username: str | None
-    uri: str | None
-    password: str | None
-
-
-class FolderEntry(t.TypedDict):
-    id: str
-    name: str | None
-
-
-class ResourceRecord(t.TypedDict, total=False):
-    id: str
-    metadata: str
-    metadata_key_id: str
-    metadata_key_type: str
-    resource_type_id: str
-    deleted: bool
-    expired: str | None
-    folder_parent_id: str | None
-    personal: bool
-
-
-class FolderRecord(t.TypedDict, total=False):
-    id: str
-    metadata: str
-    metadata_key_id: str
-    metadata_key_type: str
-    folder_parent_id: str | None
-    personal: bool
-
-
-class SecretRecord(t.TypedDict, total=False):
-    id: str
-    user_id: str
-    resource_id: str
-    data: str
-    created: str
-    modified: str
-
-
-class GpgKeyRecord(t.TypedDict, total=False):
-    id: str
-    user_id: str
-    armored_key: str
-    fingerprint: str
-
-
 def _session_path() -> Path:
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return config_root / "edwh" / "passbolt" / "session.json"
 
 
-def _load_session() -> dict[str, t.Any] | None:
+def _load_session() -> SessionData | None:
     path = _session_path()
     if not path.exists():
         return None
 
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return t.cast(SessionData, json.loads(path.read_text(encoding="utf-8")))
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Session file is corrupted: {path}") from exc
 
 
-def _save_session(data: dict[str, t.Any]) -> None:
+def _save_session(data: SessionData) -> None:
     path = _session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
@@ -126,7 +87,7 @@ def _save_session(data: dict[str, t.Any]) -> None:
         LOGGER.warning(f"Failed to set permissions on session file: {exc}")
 
 
-def _jwt_payload(token: str) -> dict[str, t.Any] | None:
+def _jwt_payload(token: str) -> JwtPayload | None:
     parts = token.split(".")
     if len(parts) != 3:
         return None
@@ -134,7 +95,7 @@ def _jwt_payload(token: str) -> dict[str, t.Any] | None:
     padding = "=" * (-len(payload_b64) % 4)
     try:
         raw = base64.urlsafe_b64decode(payload_b64 + padding)
-        return json.loads(raw.decode("utf-8"))
+        return t.cast(JwtPayload, json.loads(raw.decode("utf-8")))
     except (ValueError, json.JSONDecodeError):
         return None
 
@@ -150,7 +111,7 @@ def _token_expiry(token: str) -> int | None:
 
 
 def _encrypt_tokens(
-    tokens: dict[str, t.Any],
+    tokens: Tokens,
     gpg_home: str | None,
     recipient: str,
 ) -> str:
@@ -165,19 +126,19 @@ def _decrypt_tokens(
     encrypted: str,
     gpg_home: str | None,
     passphrase: str | None = None,
-) -> dict[str, t.Any]:
+) -> Tokens:
     if not encrypted:
         raise RuntimeError("Encrypted token payload is empty.")
     if passphrase is None:
         raw = _gpg_decrypt_interactive(encrypted, gpg_home)
     else:
         raw = _gpg_decrypt(encrypted, gpg_home, passphrase=passphrase)
-    return json.loads(raw)
+    return t.cast(Tokens, json.loads(raw))
 
 
 def _save_secure_session(
     *,
-    tokens: dict[str, t.Any],
+    tokens: Tokens,
     user_id: str,
     host: str,
     gpg_home: str | None,
@@ -192,7 +153,8 @@ def _save_secure_session(
         gpg_home,
         user_fingerprint,
     )
-    data = {
+
+    data: SessionData = {
         "format": 4,
         "host": host,
         "user_id": user_id,
@@ -207,12 +169,15 @@ def _save_secure_session(
 
 class Passbolt:
     def __init__(
-        self, base_url: str, timeout: float = 30.0, gpg_home: str | None = None
+        self,
+        base_url: str,
+        timeout: float = 30.0,
+        gpg_home: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout)
         self._gpg_home = gpg_home
-        self._session_tokens: dict[str, t.Any] | None = None
+        self._session_tokens: Tokens | None = None
 
     @classmethod
     def from_session(cls) -> "Passbolt":
@@ -222,15 +187,10 @@ class Passbolt:
                 "Not logged in. Set PASSBOLT_ACCESS_TOKEN or run `edwh passbolt.login` first.",
             )
 
-        if session.get("access_token") or session.get("refresh_token"):
-            raise RuntimeError(
-                "Session file contains plaintext tokens. Please delete it and re-login.",
-            )
-
         encrypted = session.get("encrypted_tokens")
         if not encrypted or not encrypted.strip():
             raise RuntimeError(
-                "Session file is missing encrypted tokens. Please re-login."
+                "Session file is missing encrypted tokens. Please re-login.",
             )
         host = session.get("host")
         if not host:
@@ -261,10 +221,12 @@ class Passbolt:
         return client
 
     @classmethod
-    def validate_session(cls, verify_remote: bool = True) -> dict[str, t.Any]:
+    def validate_session(cls, verify_remote: bool = True) -> SessionValidation:
         client = cls.from_session()
-        session = _load_session() or {}
-        tokens = client._session_tokens or {}
+        session = _load_session()
+        tokens = client._session_tokens
+        if not session or not tokens:
+            raise RuntimeError("Stored session is invalid. Please re-login.")
         access_token = tokens.get("access_token")
         if not access_token:
             raise RuntimeError("Stored session is invalid. Please re-login.")
@@ -280,14 +242,19 @@ class Passbolt:
             fingerprint = session.get("user_fingerprint")
             if not fingerprint:
                 raise RuntimeError(
-                    "Session is missing user_fingerprint. Please re-login."
+                    "Session is missing user_fingerprint. Please re-login.",
                 )
             refreshed = client.refresh_jwt(
-                user_id, refresh_token, access_token=access_token
+                user_id,
+                refresh_token,
+                access_token=access_token,
             )
             access_token = refreshed["access_token"]
             refresh_token = refreshed.get("refresh_token") or refresh_token
-            tokens = {"access_token": access_token, "refresh_token": refresh_token}
+            tokens: Tokens = {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+            }
             _save_secure_session(
                 tokens=tokens,
                 user_id=user_id,
@@ -298,7 +265,7 @@ class Passbolt:
 
         if verify_remote and not client.is_authenticated(access_token):
             raise RuntimeError(
-                "Stored access token is not authenticated. Please re-login."
+                "Stored access token is not authenticated. Please re-login.",
             )
 
         return {"host": client.base_url, "access_token": access_token}
@@ -310,7 +277,7 @@ class Passbolt:
     def save_session(
         self,
         *,
-        tokens: dict[str, t.Any],
+        tokens: Tokens,
         user_id: str,
         user_fingerprint: str,
         warm_agent: bool = False,
@@ -344,7 +311,7 @@ class Passbolt:
         path: str,
         payload: dict[str, t.Any] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> dict[str, t.Any]:
+    ) -> PassboltApiResponse:
         url = f"{self.base_url}{path}"
         request_headers = {
             "Accept": "application/json",
@@ -360,33 +327,36 @@ class Passbolt:
 
         try:
             LOGGER.debug(
-                f"[request] method={method} url={url} payload={payload} headers={request_headers}"
+                f"[request] method={method} url={url} payload={payload} headers={request_headers}",
             )
 
             resp = self._client.request(
-                method, url, json=payload, headers=request_headers
+                method,
+                url,
+                json=payload,
+                headers=request_headers,
             )
 
             resp.raise_for_status()
-            data = resp.json()
+            data = t.cast(PassboltApiResponse, resp.json())
             LOGGER.debug(f"[response] status={resp.status_code} data={data}")
             return data
 
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(
-                f"HTTP {exc.response.status_code} from {url}: {exc.response.text}"
+                f"HTTP {exc.response.status_code} from {url}: {exc.response.text}",
             ) from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"Network error calling {url}: {exc}") from exc
 
-    def session_info(self) -> dict[str, t.Any]:
+    def session_info(self) -> SessionData:
         session = _load_session()
         if not session:
             raise RuntimeError("Not logged in. Run `edwh passbolt.login` first.")
         return session
 
     def access_token(self) -> str:
-        return Passbolt.validate_session(verify_remote=False)["access_token"]
+        return self.validate_session(verify_remote=False)["access_token"]
 
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.access_token()}"}
@@ -397,7 +367,7 @@ class Passbolt:
         path: str,
         payload: dict[str, t.Any] | None = None,
         params: dict[str, t.Any] | None = None,
-    ) -> dict[str, t.Any]:
+    ) -> PassboltApiResponse:
         if params:
             from urllib.parse import urlencode
 
@@ -407,8 +377,10 @@ class Passbolt:
         return self.request(method, path, payload=payload, headers=self._auth_headers())
 
     def api_get(
-        self, path: str, params: dict[str, t.Any] | None = None
-    ) -> dict[str, t.Any]:
+        self,
+        path: str,
+        params: dict[str, t.Any] | None = None,
+    ) -> PassboltApiResponse:
         return self._api_request("GET", path, params=params)
 
     def api_post(
@@ -416,7 +388,7 @@ class Passbolt:
         path: str,
         payload: dict[str, t.Any],
         params: dict[str, t.Any] | None = None,
-    ) -> dict[str, t.Any]:
+    ) -> PassboltApiResponse:
         return self._api_request("POST", path, payload=payload, params=params)
 
     def api_put(
@@ -424,18 +396,20 @@ class Passbolt:
         path: str,
         payload: dict[str, t.Any],
         params: dict[str, t.Any] | None = None,
-    ) -> dict[str, t.Any]:
+    ) -> PassboltApiResponse:
         return self._api_request("PUT", path, payload=payload, params=params)
 
     def api_delete(
-        self, path: str, params: dict[str, t.Any] | None = None
-    ) -> dict[str, t.Any]:
+        self,
+        path: str,
+        params: dict[str, t.Any] | None = None,
+    ) -> PassboltApiResponse:
         return self._api_request("DELETE", path, params=params)
 
     def gpg_home(self) -> str:
         return self._gpg_home or _default_gpg_home()
 
-    def load_metadata_keys(self) -> dict[str, dict[str, t.Any]]:
+    def load_metadata_keys(self) -> dict[str, MetadataKeyRecord]:
         params = {
             "contain[metadata_private_keys]": 1,
             "filter[deleted]": 0,
@@ -445,7 +419,7 @@ class Passbolt:
         keys = data.get("body") or []
         LOGGER.debug(
             f"Loaded metadata keys from API. count={len(keys)} "
-            f"filter_deleted=0 filter_expired=0"
+            f"filter_deleted=0 filter_expired=0",
         )
         if not keys:
             data = self.api_get(
@@ -454,13 +428,13 @@ class Passbolt:
             )
             keys = data.get("body") or []
             LOGGER.debug(
-                f"Loaded metadata keys from API without filters. count={len(keys)}"
+                f"Loaded metadata keys from API without filters. count={len(keys)}",
             )
         session = self.session_info()
         user_id = session.get("user_id")
         gpg_home = self.gpg_home()
 
-        by_id: dict[str, dict[str, t.Any]] = {}
+        by_id: dict[str, MetadataKeyRecord] = {}
         for key in keys:
             key_id = key.get("id")
             if not key_id:
@@ -477,12 +451,14 @@ class Passbolt:
 
             privates = key.get("metadata_private_keys") or []
             private = next(
-                (item for item in privates if item.get("user_id") == user_id), None
+                (item for item in privates if item.get("user_id") == user_id),
+                None,
             )
             if private and private.get("data"):
                 try:
                     decrypted_private = _gpg_decrypt_interactive(
-                        private["data"], gpg_home
+                        private["data"],
+                        gpg_home,
                     )
                 except RuntimeError as exc:
                     LOGGER.warning(f"Failed to decrypt metadata private key: {exc}")
@@ -493,7 +469,7 @@ class Passbolt:
                 except json.JSONDecodeError:
                     private_payload = None
                 if isinstance(private_payload, dict) and private_payload.get(
-                    "armored_key"
+                    "armored_key",
                 ):
                     armored_private = str(private_payload.get("armored_key") or "")
                 if "BEGIN PGP" not in armored_private:
@@ -502,7 +478,7 @@ class Passbolt:
                     )
                     LOGGER.warning(
                         "Skipping invalid decrypted private key for "
-                        f"metadata_key_id={key_id} first_line={first_line}"
+                        f"metadata_key_id={key_id} first_line={first_line}",
                     )
                     continue
                 try:
@@ -516,7 +492,7 @@ class Passbolt:
         encrypted: str,
         metadata_key_id: str,
         metadata_key_type: str | None,
-        metadata_keys: dict[str, dict[str, t.Any]],
+        metadata_keys: dict[str, MetadataKeyRecord],
     ) -> dict[str, t.Any]:
         if metadata_key_type != "user_key":
             if metadata_key_id not in metadata_keys:
@@ -524,7 +500,7 @@ class Passbolt:
                     "Metadata key missing. "
                     f"requested={metadata_key_id} "
                     f"type={metadata_key_type} "
-                    f"available={list(metadata_keys.keys())}"
+                    f"available={list(metadata_keys.keys())}",
                 )
                 raise RuntimeError(f"Metadata key {metadata_key_id} not available.")
         raw = _gpg_decrypt_interactive(encrypted, self.gpg_home())
@@ -538,7 +514,7 @@ class Passbolt:
         metadata: dict[str, t.Any],
         metadata_key_id: str | None,
         metadata_key_type: str | None,
-        metadata_keys: dict[str, dict[str, t.Any]],
+        metadata_keys: dict[str, MetadataKeyRecord],
     ) -> str:
         session = self.session_info()
         user_fingerprint = session.get("user_fingerprint")
@@ -614,13 +590,15 @@ class Passbolt:
         data = self.api_get(f"/secrets/resource/{resource_id}.json")
         return data.get("body") or {}
 
-    def resource_types(self) -> dict[str, dict[str, t.Any]]:
+    @cached_property
+    def resource_types(self) -> dict[str, ResourceTypeRecord]:
         data = self.api_get("/resource-types.json")
         body = data.get("body") or []
         return {item.get("id"): item for item in body if item.get("id")}
 
-    def default_resource_type(self) -> dict[str, t.Any]:
-        resource_types = self.resource_types()
+    @cached_property
+    def default_resource_type(self) -> ResourceTypeRecord:
+        resource_types = self.resource_types
         for item in resource_types.values():
             if item.get("default"):
                 return item
@@ -635,7 +613,7 @@ class Passbolt:
             LOGGER.debug(
                 "Resolving resource "
                 f"id={resource.get('id')} "
-                f"metadata_key_id={resource.get('metadata_key_id')}"
+                f"metadata_key_id={resource.get('metadata_key_id')}",
             )
             if resource.get("id") == name_or_id:
                 return resource
@@ -645,7 +623,10 @@ class Passbolt:
             if metadata and metadata_key_id:
                 try:
                     meta = self.decrypt_metadata(
-                        metadata, metadata_key_id, metadata_key_type, metadata_keys
+                        metadata,
+                        metadata_key_id,
+                        metadata_key_type,
+                        metadata_keys,
                     )
                 except RuntimeError:
                     continue
@@ -661,13 +642,17 @@ class Passbolt:
                 return folder
             if folder.get("name") == name_or_id:
                 return folder
+
             metadata = folder.get("metadata")
             metadata_key_id = folder.get("metadata_key_id")
             metadata_key_type = folder.get("metadata_key_type")
             if metadata and metadata_key_id:
                 try:
                     meta = self.decrypt_metadata(
-                        metadata, metadata_key_id, metadata_key_type, metadata_keys
+                        metadata,
+                        metadata_key_id,
+                        metadata_key_type,
+                        metadata_keys,
                     )
                 except RuntimeError:
                     continue
@@ -681,8 +666,9 @@ class Passbolt:
         entries: list[FolderEntry] = []
         for folder in folders:
             if folder.get("name"):
-                entries.append({"id": folder.get("id"), "name": folder.get("name")})
+                entries.append({"id": folder["id"], "name": folder.get("name")})
                 continue
+
             metadata = folder.get("metadata")
             metadata_key_id = folder.get("metadata_key_id")
             metadata_key_type = folder.get("metadata_key_type")
@@ -690,17 +676,21 @@ class Passbolt:
                 continue
             try:
                 meta = self.decrypt_metadata(
-                    metadata, metadata_key_id, metadata_key_type, metadata_keys
+                    metadata,
+                    metadata_key_id,
+                    metadata_key_type,
+                    metadata_keys,
                 )
             except RuntimeError as exc:
                 LOGGER.warning(
-                    f"Failed to decrypt folder metadata for id={folder.get('id')}: {exc}"
+                    f"Failed to decrypt folder metadata for id={folder.get('id')}: {exc}",
                 )
                 continue
-            entries.append({"id": folder.get("id"), "name": meta.get("name")})
+            entries.append({"id": folder["id"], "name": meta.get("name")})
+
         return entries
 
-    def _resource_type_supports_uris(self, resource_type: dict[str, t.Any]) -> bool:
+    def _resource_type_supports_uris(self, resource_type: ResourceTypeRecord) -> bool:
         definition = resource_type.get("definition") or {}
         resource_def = definition.get("resource") or {}
         properties = resource_def.get("properties") or {}
@@ -710,7 +700,7 @@ class Passbolt:
         self,
         metadata: dict[str, t.Any],
         uri: str | None,
-        resource_type: dict[str, t.Any],
+        resource_type: ResourceTypeRecord,
     ) -> dict[str, t.Any]:
         if uri is None:
             return metadata
@@ -759,16 +749,20 @@ class Passbolt:
                 continue
             try:
                 meta = self.decrypt_metadata(
-                    metadata, metadata_key_id, metadata_key_type, metadata_keys
+                    metadata,
+                    metadata_key_id,
+                    metadata_key_type,
+                    metadata_keys,
                 )
             except RuntimeError as exc:
                 LOGGER.warning(
-                    f"Failed to decrypt metadata for id={resource.get('id')}: {exc}"
+                    f"Failed to decrypt metadata for id={resource.get('id')}: {exc}",
                 )
                 continue
+
             entries.append(
                 {
-                    "id": resource.get("id"),
+                    "id": resource["id"],
                     "name": meta.get("name"),
                     "username": meta.get("username"),
                     "uri": (meta.get("uri") or (meta.get("uris") or [None])[0]),
@@ -793,18 +787,21 @@ class Passbolt:
         choices: dict[str, PasswordEntry] = {}
         for entry in entries:
             label = " | ".join(
-                part
-                for part in [
-                    str(entry.get("name") or "").strip(),
-                    str(entry.get("username") or "").strip(),
-                    str(entry.get("uri") or "").strip(),
-                ]
-                if part
+                (
+                    part
+                    for part in (
+                        str(entry.get("name") or "").strip(),
+                        str(entry.get("username") or "").strip(),
+                        str(entry.get("uri") or "").strip(),
+                    )
+                    if part
+                )
             ).strip()
             if not label:
                 continue
             choices[label] = entry
 
+        # noinspection PyTypeChecker
         results = process.extract(
             term,
             choices.keys(),
@@ -821,8 +818,9 @@ class Passbolt:
             if include_passwords and resource_id:
                 try:
                     password = self.get_password_field(resource_id, "password")
-                except Exception as exc:  # noqa: BLE001
+                except RuntimeError as exc:
                     password = f"Error: {exc}"
+
             output.append(
                 {
                     "score": int(score),
@@ -831,7 +829,7 @@ class Passbolt:
                     "username": entry.get("username"),
                     "uri": entry.get("uri"),
                     "password": password,
-                }
+                },
             )
         return output
 
@@ -882,10 +880,17 @@ class Passbolt:
         resource = self.resolve_resource(name)
         if resource:
             return self.update_password(
-                resource["id"], password, username=username, uri=uri
+                resource["id"],
+                password,
+                username=username,
+                uri=uri,
             )
         return self.create_password(
-            name, password, username=username, uri=uri, folder=folder
+            name,
+            password,
+            username=username,
+            uri=uri,
+            folder=folder,
         )
 
     def create_password(
@@ -899,12 +904,12 @@ class Passbolt:
         metadata_keys = self.load_metadata_keys()
         LOGGER.debug(
             f"create_password metadata_keys_count={len(metadata_keys)} "
-            f"metadata_key_ids={list(metadata_keys.keys())}"
+            f"metadata_key_ids={list(metadata_keys.keys())}",
         )
-        resource_types = self.resource_types()
-        resource_type = self.default_resource_type()
+        resource_types = self.resource_types
+        resource_type = self.default_resource_type
         if resource_type.get("slug") and not str(resource_type.get("slug")).startswith(
-            "v5-"
+            "v5-",
         ):
             v5_default = next(
                 (
@@ -939,7 +944,10 @@ class Passbolt:
             resource_type_id=resource_type["id"],
         )
         encrypted_metadata = self.encrypt_metadata(
-            metadata, metadata_key_id, metadata_key_type, metadata_keys
+            metadata,
+            metadata_key_id,
+            metadata_key_type,
+            metadata_keys,
         )
 
         session = self.session_info()
@@ -987,8 +995,9 @@ class Passbolt:
         )
         if username is not None:
             metadata["username"] = username
-        resource_types = self.resource_types()
+        resource_types = self.resource_types
         resource_type = resource_types.get(resource["resource_type_id"]) or {}
+
         metadata = self._apply_uri_field(metadata, uri, resource_type)
         encrypted_metadata = self.encrypt_metadata(
             metadata,
@@ -1036,7 +1045,7 @@ class Passbolt:
         self.api_delete(f"/resources/{resource['id']}.json")
         return str(resource["id"])
 
-    def verify(self) -> dict[str, t.Any]:
+    def verify(self) -> PassboltApiResponse:
         return self.request("GET", "/auth/verify.json")
 
     def is_authenticated(self, access_token: str) -> bool:
@@ -1052,7 +1061,7 @@ class Passbolt:
         user_id: str,
         refresh_token: str,
         access_token: str | None = None,
-    ) -> dict[str, t.Any]:
+    ) -> RefreshTokens:
         headers = {}
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
@@ -1066,14 +1075,16 @@ class Passbolt:
         access = body.get("access_token") or data.get("access_token")
         if not access:
             raise RuntimeError("Missing access_token in refresh response.")
-        refreshed = {"access_token": access}
+        refreshed: RefreshTokens = {"access_token": access}
         if cookie_refresh := self._client.cookies.get("refresh_token"):
             refreshed["refresh_token"] = cookie_refresh
         return refreshed
 
-    def jwt_login(self, user_id: str, challenge: str) -> dict[str, t.Any]:
+    def jwt_login(self, user_id: str, challenge: str) -> PassboltApiResponse:
         return self.request(
-            "POST", "/auth/jwt/login.json", {"user_id": user_id, "challenge": challenge}
+            "POST",
+            "/auth/jwt/login.json",
+            {"user_id": user_id, "challenge": challenge},
         )
 
     def login_jwt(
@@ -1082,7 +1093,7 @@ class Passbolt:
         import_key: str | None,
         passphrase: str | None,
         verify_expiry: int,
-    ) -> dict[str, t.Any]:
+    ) -> LoginTokens:
         user_id = user_id.strip()
         if not user_id:
             raise RuntimeError("user_id is required for JWT login.")
@@ -1111,7 +1122,11 @@ class Passbolt:
             "verify_token_expiry": int(time.time()) + int(verify_expiry),
         }
         challenge = _gpg_sign_encrypt(
-            payload, user_key, server_fingerprint, self._gpg_home, passphrase=passphrase
+            payload,
+            user_key,
+            server_fingerprint,
+            self._gpg_home,
+            passphrase=passphrase,
         )
 
         data = self.jwt_login(user_id, challenge)
@@ -1127,14 +1142,14 @@ class Passbolt:
         mfa_providers = response.get("mfa_providers")
         if mfa_providers:
             raise RuntimeError(
-                f"MFA required: {mfa_providers}. MFA flow is not implemented yet."
+                f"MFA required: {mfa_providers}. MFA flow is not implemented yet.",
             )
 
         access = response.get("access_token")
         refresh = response.get("refresh_token")
         if not access or not refresh:
             raise RuntimeError(
-                "Missing access_token or refresh_token in login response."
+                "Missing access_token or refresh_token in login response.",
             )
 
         return {
@@ -1197,7 +1212,9 @@ def _run_gpg(
 
 
 def _gpg_import(
-    keydata: str, gpg_home: str | None, passphrase: str | None = None
+    keydata: str,
+    gpg_home: str | None,
+    passphrase: str | None = None,
 ) -> None:
     _run_gpg(["--import"], keydata, gpg_home, passphrase=passphrase)
 
@@ -1248,7 +1265,9 @@ def _gpg_sign_encrypt(
 
 
 def _gpg_decrypt(
-    message: str, gpg_home: str | None, passphrase: str | None = None
+    message: str,
+    gpg_home: str | None,
+    passphrase: str | None = None,
 ) -> str:
     return _run_gpg(["--decrypt"], message, gpg_home, passphrase=passphrase)
 
@@ -1269,7 +1288,10 @@ def _gpg_encrypt(message: str, recipient: str, gpg_home: str | None) -> str:
 
 
 def _gpg_encrypt_signed(
-    message: str, recipient: str, signer: str, gpg_home: str | None
+    message: str,
+    recipient: str,
+    signer: str,
+    gpg_home: str | None,
 ) -> str:
     return _run_gpg(
         [
@@ -1300,7 +1322,9 @@ def _run_gpg_interactive(
         raise RuntimeError("gpg is required but was not found in PATH.")
     if passphrase or use_batch:
         with tempfile.NamedTemporaryFile(
-            mode="w+", encoding="utf-8", delete=True
+            mode="w+",
+            encoding="utf-8",
+            delete=True,
         ) as temp:
             temp.write(input_data)
             temp.flush()

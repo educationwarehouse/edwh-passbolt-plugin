@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import secrets
+import contextlib
 import typing as t
 from getpass import getpass
 from pathlib import Path
 
 from edwh import task
 from invoke import Context
-from rapidfuzz import fuzz, process
 from rich import print as rprint
 from rich.table import Table
 from threadful import animate, thread
@@ -55,7 +54,7 @@ def with_spinner(func: t.Callable[[], T], text: str) -> T:
 
 
 @task()
-def ensure_logged_in(c: Context) -> None:
+def ensure_logged_in(_: Context) -> None:
     Passbolt.validate_session()
 
 
@@ -108,13 +107,12 @@ def login(
 ) -> None:
     """Authenticate against Passbolt and cache a session/token locally."""
     if not force:
-        try:
+        with contextlib.suppress(Exception):
             Passbolt.validate_session()
             answer = _prompt("A valid session exists. Re-login? (y/N)", "N").lower()
             if answer not in {"y", "yes"}:
                 return
-        except Exception:  # noqa: BLE001
-            pass
+
     if not any([host, user_id, import_key, passphrase]):
         host, user_id, import_key, passphrase = _prompt_login_inputs()
     if passphrase is None:
@@ -150,25 +148,11 @@ def logout(c: Context) -> None:
     name="list",
     aliases=("list-passwords", "list-password"),
 )
-def list_passwords(
-    c: Context, search: str | None = None, folder: str | None = None
-) -> None:
+def list_passwords(_: Context, folder: str | None = None) -> None:
     """List available passwords (optionally filtered)."""
     client = Passbolt.from_session()
     entries = with_spinner(client.list_password_entries, text="Loading passwords...")
-    if search:
-        search_lower = search.lower()
-        entries = [
-            entry
-            for entry in entries
-            if search_lower
-            in " ".join(
-                (
-                    str(entry.get(field) or "").lower()
-                    for field in ("name", "username", "uri")
-                )
-            )
-        ]
+
     if folder:
         folder_lower = folder.lower()
         entries = [
@@ -199,7 +183,7 @@ def list_passwords(
     name="list-folders",
     aliases=("folders",),
 )
-def list_folders(c: Context) -> None:
+def list_folders(_: Context) -> None:
     """List available folders."""
     client = Passbolt.from_session()
     entries = with_spinner(client.list_folder_entries, text="Loading folders...")
@@ -223,7 +207,7 @@ def list_folders(c: Context) -> None:
     aliases=("get-password",),
     pre=[ensure_logged_in],
 )
-def get_password(c: Context, name: str, field: str = "password") -> None:
+def get_password(_: Context, name: str, field: str = "password") -> None:
     """Retrieve a password (or specific field) for an entry."""
     client = Passbolt.from_session()
     value = with_spinner(
@@ -243,7 +227,7 @@ def get_password(c: Context, name: str, field: str = "password") -> None:
     name="search",
 )
 def search_passwords(
-    c: Context, term: str, limit: int = 10, threshold: int = 70
+    _: Context, term: str, limit: int = 10, threshold: int = 70
 ) -> None:
     """Fuzzy search passwords and show matching entries (including passwords)."""
     client = Passbolt.from_session()
@@ -283,7 +267,7 @@ def search_passwords(
     aliases=("set-password",),
 )
 def set_password(
-    c: Context,
+    _: Context,
     name: str | None = None,
     password: str | None = None,
     username: str | None = None,
@@ -322,7 +306,7 @@ def set_password(
     name="delete",
     aliases=("delete-password",),
 )
-def delete_password(c: Context, name: str) -> None:
+def delete_password(_: Context, name: str) -> None:
     """Delete a password entry."""
     client = Passbolt.from_session()
     resource_id = with_spinner(
@@ -333,7 +317,7 @@ def delete_password(c: Context, name: str) -> None:
 
 
 # @task(help={"name": "Entry name or ID"}, pre=[ensure_logged_in])
-# def rotate_password(c: Context, name: str) -> None:
+# def rotate_password(_: Context, name: str) -> None:
 #     """Generate and set a new password for an entry."""
 #     new_password = secrets.token_urlsafe(24)
 #     client = Passbolt.from_session()
