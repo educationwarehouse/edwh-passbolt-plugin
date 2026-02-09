@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 
 import httpx
+from rapidfuzz import fuzz, process
 
 
 def _configure_logging() -> logging.Logger:
@@ -46,6 +47,15 @@ class PasswordEntry(t.TypedDict):
     username: str | None
     uri: str | None
     folder: str | None
+
+
+class SearchResultEntry(t.TypedDict):
+    score: int
+    id: str
+    name: str | None
+    username: str | None
+    uri: str | None
+    password: str | None
 
 
 class FolderEntry(t.TypedDict):
@@ -349,8 +359,6 @@ class Passbolt:
             request_headers["X-CSRF-Token"] = csrf
 
         try:
-            print(url) # fixme: remove after everything works but @AI: don't touch it
-
             LOGGER.debug(
                 f"[request] method={method} url={url} payload={payload} headers={request_headers}"
             )
@@ -484,7 +492,9 @@ class Passbolt:
                     private_payload = json.loads(decrypted_private)
                 except json.JSONDecodeError:
                     private_payload = None
-                if isinstance(private_payload, dict) and private_payload.get("armored_key"):
+                if isinstance(private_payload, dict) and private_payload.get(
+                    "armored_key"
+                ):
                     armored_private = str(private_payload.get("armored_key") or "")
                 if "BEGIN PGP" not in armored_private:
                     first_line = (
@@ -575,9 +585,7 @@ class Passbolt:
     def list_folders(self) -> list[FolderRecord]:
         data = self.api_get("/folders.json")
         folders = data.get("body") or []
-        LOGGER.debug(
-            f"Loaded folders from API. count={len(folders)}"
-        )
+        LOGGER.debug(f"Loaded folders from API. count={len(folders)}")
         return folders
 
     def get_resource(self, resource_id: str) -> ResourceRecord:
@@ -734,10 +742,14 @@ class Passbolt:
         }
         return metadata
 
-    def list_password_entries(self) -> list[PasswordEntry]:
+    def list_password_entries(self, include_folder: bool = True) -> list[PasswordEntry]:
         resources = self.list_resources()
         metadata_keys = self.load_metadata_keys()
-        folders = {entry["id"]: entry.get("name") for entry in self.list_folder_entries()}
+        folders: dict[str, str | None] = {}
+        if include_folder:
+            folders = {
+                entry["id"]: entry.get("name") for entry in self.list_folder_entries()
+            }
         entries: list[PasswordEntry] = []
         for resource in resources:
             metadata = resource.get("metadata")
@@ -760,10 +772,68 @@ class Passbolt:
                     "name": meta.get("name"),
                     "username": meta.get("username"),
                     "uri": (meta.get("uri") or (meta.get("uris") or [None])[0]),
-                    "folder": folders.get(resource.get("folder_parent_id") or ""),
+                    "folder": (
+                        folders.get(resource.get("folder_parent_id") or "")
+                        if include_folder
+                        else None
+                    ),
                 }
             )
         return entries
+
+    def search_password_entries(
+        self,
+        term: str,
+        *,
+        limit: int = 10,
+        threshold: int = 70,
+        include_passwords: bool = False,
+    ) -> list[SearchResultEntry]:
+        entries = self.list_password_entries(include_folder=False)
+        choices: dict[str, PasswordEntry] = {}
+        for entry in entries:
+            label = " | ".join(
+                part
+                for part in [
+                    str(entry.get("name") or "").strip(),
+                    str(entry.get("username") or "").strip(),
+                    str(entry.get("uri") or "").strip(),
+                ]
+                if part
+            ).strip()
+            if not label:
+                continue
+            choices[label] = entry
+
+        results = process.extract(
+            term,
+            choices.keys(),
+            scorer=fuzz.WRatio,
+            score_cutoff=threshold,
+            limit=limit,
+        )
+
+        output: list[SearchResultEntry] = []
+        for label, score, _ in results:
+            entry = choices.get(label) or {}
+            resource_id = str(entry.get("id") or "")
+            password: str | None = None
+            if include_passwords and resource_id:
+                try:
+                    password = self.get_password_field(resource_id, "password")
+                except Exception as exc:  # noqa: BLE001
+                    password = f"Error: {exc}"
+            output.append(
+                {
+                    "score": int(score),
+                    "id": resource_id,
+                    "name": entry.get("name"),
+                    "username": entry.get("username"),
+                    "uri": entry.get("uri"),
+                    "password": password,
+                }
+            )
+        return output
 
     def get_password_field(self, name_or_id: str, field: str) -> str:
         field = field.lower()
@@ -837,7 +907,11 @@ class Passbolt:
             "v5-"
         ):
             v5_default = next(
-                (rt for rt in resource_types.values() if rt.get("slug") == "v5-default"),
+                (
+                    rt
+                    for rt in resource_types.values()
+                    if rt.get("slug") == "v5-default"
+                ),
                 None,
             )
             if v5_default:
@@ -948,7 +1022,9 @@ class Passbolt:
             "metadata_key_id": resource["metadata_key_id"],
             "metadata_key_type": resource["metadata_key_type"],
             "resource_type_id": resource["resource_type_id"],
-            "secrets": [{"id": secret_id, "data": encrypted_secret, "user_id": user_id}],
+            "secrets": [
+                {"id": secret_id, "data": encrypted_secret, "user_id": user_id}
+            ],
         }
         self.api_put(f"/resources/{resource['id']}.json", payload=payload)
         return str(resource["id"])

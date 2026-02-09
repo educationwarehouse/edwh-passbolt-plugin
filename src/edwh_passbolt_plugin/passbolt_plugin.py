@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import secrets
+import typing as t
 from getpass import getpass
 from pathlib import Path
 
 from edwh import task
 from invoke import Context
-from rich.console import Console
+from rapidfuzz import fuzz, process
+from rich import print as rprint
 from rich.table import Table
+from threadful import animate, thread
 
 from .passbolt import Passbolt
+
+T = t.TypeVar("T")
 
 
 def _normalize_base_url(host: str) -> str:
@@ -39,6 +44,14 @@ def _read_key_block(first_line: str | None = None) -> str:
             break
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+def with_spinner(func: t.Callable[[], T], text: str) -> T:
+    @thread
+    def _task() -> T:
+        return func()
+
+    return animate(_task(), text=text)
 
 
 @task()
@@ -142,7 +155,7 @@ def list_passwords(
 ) -> None:
     """List available passwords (optionally filtered)."""
     client = Passbolt.from_session()
-    entries = client.list_password_entries()
+    entries = with_spinner(client.list_password_entries, text="Loading passwords...")
     if search:
         search_lower = search.lower()
         entries = [
@@ -178,7 +191,7 @@ def list_passwords(
             str(entry.get("uri") or ""),
             str(entry.get("folder") or ""),
         )
-    Console().print(table)
+    rprint(table)
 
 
 @task(
@@ -189,7 +202,7 @@ def list_passwords(
 def list_folders(c: Context) -> None:
     """List available folders."""
     client = Passbolt.from_session()
-    entries = client.list_folder_entries()
+    entries = with_spinner(client.list_folder_entries, text="Loading folders...")
     table = Table(title="Passbolt Folders")
     table.add_column("ID", overflow="fold")
     table.add_column("Name")
@@ -198,7 +211,7 @@ def list_folders(c: Context) -> None:
             str(entry.get("id") or ""),
             str(entry.get("name") or ""),
         )
-    Console().print(table)
+    rprint(table)
 
 
 @task(
@@ -213,8 +226,49 @@ def list_folders(c: Context) -> None:
 def get_password(c: Context, name: str, field: str = "password") -> None:
     """Retrieve a password (or specific field) for an entry."""
     client = Passbolt.from_session()
-    value = client.get_password_field(name, field)
+    value = with_spinner(
+        lambda: client.get_password_field(name, field),
+        text="Fetching password...",
+    )
     print(value)
+
+
+@task(
+    help={
+        "term": "Search term",
+        "limit": "Max number of results (default: 10)",
+        "threshold": "Minimum fuzzy score (0-100, default: 70)",
+    },
+    pre=[ensure_logged_in],
+    name="search",
+)
+def search_passwords(
+    c: Context, term: str, limit: int = 10, threshold: int = 70
+) -> None:
+    """Fuzzy search passwords and show matching entries (including passwords)."""
+    client = Passbolt.from_session()
+    results = with_spinner(
+        lambda: client.search_password_entries(
+            term, limit=limit, threshold=threshold, include_passwords=True
+        ),
+        text="Searching passwords...",
+    )
+
+    table = Table(title=f"Search Results for: {term}")
+    table.add_column("Name")
+    table.add_column("Username")
+    table.add_column("URI")
+    table.add_column("Password")
+
+    for entry in results:
+        table.add_row(
+            str(entry.get("name") or ""),
+            str(entry.get("username") or ""),
+            str(entry.get("uri") or ""),
+            str(entry.get("password") or ""),
+        )
+
+    rprint(table)
 
 
 @task(
@@ -253,8 +307,11 @@ def set_password(
     if uri is None:
         uri = _prompt("URI (optional)", "") or None
 
-    resource_id = client.set_password(
-        str(name), password, username=username, uri=uri, folder=folder
+    resource_id = with_spinner(
+        lambda: client.set_password(
+            str(name), password, username=username, uri=uri, folder=folder
+        ),
+        text="Saving password...",
     )
     print(resource_id)
 
@@ -268,14 +325,20 @@ def set_password(
 def delete_password(c: Context, name: str) -> None:
     """Delete a password entry."""
     client = Passbolt.from_session()
-    resource_id = client.delete_password(name)
+    resource_id = with_spinner(
+        lambda: client.delete_password(name),
+        text="Deleting password...",
+    )
     print(resource_id)
 
 
-@task(help={"name": "Entry name or ID"}, pre=[ensure_logged_in])
-def rotate_password(c: Context, name: str) -> None:
-    """Generate and set a new password for an entry."""
-    new_password = secrets.token_urlsafe(24)
-    client = Passbolt.from_session()
-    client.set_password(name, new_password)
-    print(new_password)
+# @task(help={"name": "Entry name or ID"}, pre=[ensure_logged_in])
+# def rotate_password(c: Context, name: str) -> None:
+#     """Generate and set a new password for an entry."""
+#     new_password = secrets.token_urlsafe(24)
+#     client = Passbolt.from_session()
+#     with_spinner(
+#         lambda: client.set_password(name, new_password),
+#         text="Rotating password...",
+#     )
+#     print(new_password)
