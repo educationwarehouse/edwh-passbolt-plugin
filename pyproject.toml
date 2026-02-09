@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edwh-passbolt-plugin"
+dynamic = ["version"]
+description = "Passbolt tasks plugin for edwh"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+keywords = ["edwh", "passbolt"]
+authors = [
+    { name = "Remco Boerma", email = "remco.b@educationwarehouse.nl" },
+    { name = "Robin van der Noord", email = "robin.vdn@educationwarehouse.nl" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+    "edwh",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hatch",
+    "python-semantic-release < 8",
+    "black",
+]
+
+[project.urls]
+Documentation = "https://github.com/educationwarehouse/edwh-passbolt-plugin#readme"
+Issues = "https://github.com/educationwarehouse/edwh-passbolt-plugin/issues"
+Source = "https://github.com/educationwarehouse/edwh-passbolt-plugin"
+
+# https://packaging.python.org/en/latest/guides/creating-and-discovering-plugins/#using-package-metadata
+[project.entry-points."edwh.tasks"]
+# namespace: (edwh passbolt.command)
+passbolt = "edwh_passbolt_plugin.passbolt_plugin"
+
+[tool.hatch.version]
+path = "src/edwh_passbolt_plugin/__about__.py"
+
+[tool.semantic_release]
+branch = "master"
+version_variable = "src/edwh_passbolt_plugin/__about__.py:__version__"
+change_log = "CHANGELOG.md"
+upload_to_repository = false
+upload_to_release = false
+build_command = "hatch build"
+
+parser_angular_minor_types = "feat,minor"
+parser_angular_patch_types = "fix,perf,refactor,build,chore,patch"
