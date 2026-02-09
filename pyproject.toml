@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "edwh",
     "httpx",
+    "rich",
 ]
 
 [project.optional-dependencies]

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import secrets
 from getpass import getpass
 from pathlib import Path
 
 from edwh import task
 from invoke import Context
+from rich.console import Console
+from rich.table import Table
 
 from .passbolt import Passbolt
 
@@ -47,7 +50,7 @@ def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
     host = _prompt(f"Passbolt host (e.g. {DEFAULT_HOST})") or DEFAULT_HOST
     host = _normalize_base_url(host)
     user_id = _prompt(
-        f"Passbolt user UUID (find it via {host}/app/users, click your user, copy UUID from URL)"
+        f"Passbolt user UUID (find it via {host}/app/users, click your user, copy UUID from URL)",
     )
     import_mode_raw = _prompt("Import key? (path/paste/skip)", "skip")
     import_mode = import_mode_raw.lower()
@@ -78,7 +81,7 @@ DEFAULT_HOST = "https://passbolt.edwh.nl"
         "passphrase": "GPG key passphrase (uses loopback pinentry; avoid unless necessary)",
         "verify_expiry": "Challenge expiry in seconds (default: 300)",
         "force": "Force re-login even if a valid session exists",
-    }
+    },
 )
 def login(
     c: Context,
@@ -129,14 +132,73 @@ def logout(c: Context) -> None:
 
 
 @task(
-    help={"search": "Filter on name/username/uri"},
+    help={"search": "Filter on name/username/uri", "folder": "Filter on folder name"},
     pre=[ensure_logged_in],
     name="list",
-    aliases=["list-passwords", "list-password"],
+    aliases=("list-passwords", "list-password"),
 )
-def list_passwords(c: Context, search: str | None = None) -> None:
+def list_passwords(
+    c: Context, search: str | None = None, folder: str | None = None
+) -> None:
     """List available passwords (optionally filtered)."""
-    raise NotImplementedError("Implement listing secrets.")
+    client = Passbolt.from_session()
+    entries = client.list_password_entries()
+    if search:
+        search_lower = search.lower()
+        entries = [
+            entry
+            for entry in entries
+            if search_lower
+            in " ".join(
+                (
+                    str(entry.get(field) or "").lower()
+                    for field in ("name", "username", "uri")
+                )
+            )
+        ]
+    if folder:
+        folder_lower = folder.lower()
+        entries = [
+            entry
+            for entry in entries
+            if folder_lower in str(entry.get("folder") or "").lower()
+        ]
+
+    table = Table(title="Passbolt Passwords")
+    table.add_column("ID", overflow="fold")
+    table.add_column("Name")
+    table.add_column("Username")
+    table.add_column("URI")
+    table.add_column("Folder")
+    for entry in entries:
+        table.add_row(
+            str(entry.get("id") or ""),
+            str(entry.get("name") or ""),
+            str(entry.get("username") or ""),
+            str(entry.get("uri") or ""),
+            str(entry.get("folder") or ""),
+        )
+    Console().print(table)
+
+
+@task(
+    pre=[ensure_logged_in],
+    name="list-folders",
+    aliases=("folders",),
+)
+def list_folders(c: Context) -> None:
+    """List available folders."""
+    client = Passbolt.from_session()
+    entries = client.list_folder_entries()
+    table = Table(title="Passbolt Folders")
+    table.add_column("ID", overflow="fold")
+    table.add_column("Name")
+    for entry in entries:
+        table.add_row(
+            str(entry.get("id") or ""),
+            str(entry.get("name") or ""),
+        )
+    Console().print(table)
 
 
 @task(
@@ -144,35 +206,76 @@ def list_passwords(c: Context, search: str | None = None) -> None:
         "name": "Entry name or ID",
         "field": "Which field to return (password/user/uri)",
     },
+    name="get",
+    aliases=("get-password",),
     pre=[ensure_logged_in],
 )
 def get_password(c: Context, name: str, field: str = "password") -> None:
     """Retrieve a password (or specific field) for an entry."""
-    raise NotImplementedError("Implement fetching a secret field.")
+    client = Passbolt.from_session()
+    value = client.get_password_field(name, field)
+    print(value)
 
 
 @task(
-    help={"name": "Entry name or ID", "username": "Username", "uri": "Resource URI"},
+    help={
+        "name": "Entry name or ID",
+        "username": "Username",
+        "uri": "Resource URI",
+        "folder": "Folder name or ID (optional)",
+    },
     pre=[ensure_logged_in],
+    name="set",
+    aliases=("set-password",),
 )
 def set_password(
     c: Context,
-    name: str,
-    password: str,
+    name: str | None = None,
+    password: str | None = None,
     username: str | None = None,
     uri: str | None = None,
+    folder: str | None = None,
 ) -> None:
     """Create or update a password entry."""
-    raise NotImplementedError("Implement creating/updating a secret.")
+    client = Passbolt.from_session()
+
+    if not name:
+        name = _prompt("Entry name or ID")
+
+    if username is None:
+        username = _prompt("Username (optional)", "") or None
+
+    if password is None:
+        password = getpass("Password: ").strip()
+    if not password:
+        raise RuntimeError("Password is required.")
+
+    if uri is None:
+        uri = _prompt("URI (optional)", "") or None
+
+    resource_id = client.set_password(
+        str(name), password, username=username, uri=uri, folder=folder
+    )
+    print(resource_id)
 
 
-@task(help={"name": "Entry name or ID"}, pre=[ensure_logged_in])
+@task(
+    help={"name": "Entry name or ID"},
+    pre=[ensure_logged_in],
+    name="delete",
+    aliases=("delete-password",),
+)
 def delete_password(c: Context, name: str) -> None:
     """Delete a password entry."""
-    raise NotImplementedError("Implement deletion of a secret.")
+    client = Passbolt.from_session()
+    resource_id = client.delete_password(name)
+    print(resource_id)
 
 
 @task(help={"name": "Entry name or ID"}, pre=[ensure_logged_in])
 def rotate_password(c: Context, name: str) -> None:
     """Generate and set a new password for an entry."""
-    raise NotImplementedError("Implement rotation logic.")
+    new_password = secrets.token_urlsafe(24)
+    client = Passbolt.from_session()
+    client.set_password(name, new_password)
+    print(new_password)

@@ -40,6 +40,56 @@ def _configure_logging() -> logging.Logger:
 LOGGER = _configure_logging()
 
 
+class PasswordEntry(t.TypedDict):
+    id: str
+    name: str | None
+    username: str | None
+    uri: str | None
+    folder: str | None
+
+
+class FolderEntry(t.TypedDict):
+    id: str
+    name: str | None
+
+
+class ResourceRecord(t.TypedDict, total=False):
+    id: str
+    metadata: str
+    metadata_key_id: str
+    metadata_key_type: str
+    resource_type_id: str
+    deleted: bool
+    expired: str | None
+    folder_parent_id: str | None
+    personal: bool
+
+
+class FolderRecord(t.TypedDict, total=False):
+    id: str
+    metadata: str
+    metadata_key_id: str
+    metadata_key_type: str
+    folder_parent_id: str | None
+    personal: bool
+
+
+class SecretRecord(t.TypedDict, total=False):
+    id: str
+    user_id: str
+    resource_id: str
+    data: str
+    created: str
+    modified: str
+
+
+class GpgKeyRecord(t.TypedDict, total=False):
+    id: str
+    user_id: str
+    armored_key: str
+    fingerprint: str
+
+
 def _session_path() -> Path:
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return config_root / "edwh" / "passbolt" / "session.json"
@@ -63,7 +113,7 @@ def _save_session(data: dict[str, t.Any]) -> None:
     try:
         path.chmod(0o600)
     except OSError as exc:
-        LOGGER.warning("Failed to set permissions on session file: %s", exc)
+        LOGGER.warning(f"Failed to set permissions on session file: {exc}")
 
 
 def _jwt_payload(token: str) -> dict[str, t.Any] | None:
@@ -201,7 +251,7 @@ class Passbolt:
         return client
 
     @classmethod
-    def validate_session(cls) -> dict[str, t.Any]:
+    def validate_session(cls, verify_remote: bool = True) -> dict[str, t.Any]:
         client = cls.from_session()
         session = _load_session() or {}
         tokens = client._session_tokens or {}
@@ -236,7 +286,7 @@ class Passbolt:
                 user_fingerprint=fingerprint,
             )
 
-        if not client.is_authenticated(access_token):
+        if verify_remote and not client.is_authenticated(access_token):
             raise RuntimeError(
                 "Stored access token is not authenticated. Please re-login."
             )
@@ -270,7 +320,7 @@ class Passbolt:
                 try:
                     _gpg_decrypt_interactive(encrypted, self._gpg_home)
                 except RuntimeError as exc:
-                    LOGGER.warning("Failed to warm GPG agent cache: %s", exc)
+                    LOGGER.warning(f"Failed to warm GPG agent cache: {exc}")
 
     def close(self) -> None:
         self._client.close()
@@ -299,12 +349,10 @@ class Passbolt:
             request_headers["X-CSRF-Token"] = csrf
 
         try:
+            print(url) # fixme: remove after everything works but @AI: don't touch it
+
             LOGGER.debug(
-                "[request] method=%s url=%s payload=%s headers=%s",
-                method,
-                url,
-                payload,
-                request_headers,
+                f"[request] method={method} url={url} payload={payload} headers={request_headers}"
             )
 
             resp = self._client.request(
@@ -313,7 +361,7 @@ class Passbolt:
 
             resp.raise_for_status()
             data = resp.json()
-            LOGGER.debug("[response] status=%s data=%s", resp.status_code, data)
+            LOGGER.debug(f"[response] status={resp.status_code} data={data}")
             return data
 
         except httpx.HTTPStatusError as exc:
@@ -322,6 +370,595 @@ class Passbolt:
             ) from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"Network error calling {url}: {exc}") from exc
+
+    def session_info(self) -> dict[str, t.Any]:
+        session = _load_session()
+        if not session:
+            raise RuntimeError("Not logged in. Run `edwh passbolt.login` first.")
+        return session
+
+    def access_token(self) -> str:
+        return Passbolt.validate_session(verify_remote=False)["access_token"]
+
+    def _auth_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.access_token()}"}
+
+    def _api_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, t.Any] | None = None,
+        params: dict[str, t.Any] | None = None,
+    ) -> dict[str, t.Any]:
+        if params:
+            from urllib.parse import urlencode
+
+            query = urlencode(params, doseq=True, safe="[]")
+            sep = "&" if "?" in path else "?"
+            path = f"{path}{sep}{query}"
+        return self.request(method, path, payload=payload, headers=self._auth_headers())
+
+    def api_get(
+        self, path: str, params: dict[str, t.Any] | None = None
+    ) -> dict[str, t.Any]:
+        return self._api_request("GET", path, params=params)
+
+    def api_post(
+        self,
+        path: str,
+        payload: dict[str, t.Any],
+        params: dict[str, t.Any] | None = None,
+    ) -> dict[str, t.Any]:
+        return self._api_request("POST", path, payload=payload, params=params)
+
+    def api_put(
+        self,
+        path: str,
+        payload: dict[str, t.Any],
+        params: dict[str, t.Any] | None = None,
+    ) -> dict[str, t.Any]:
+        return self._api_request("PUT", path, payload=payload, params=params)
+
+    def api_delete(
+        self, path: str, params: dict[str, t.Any] | None = None
+    ) -> dict[str, t.Any]:
+        return self._api_request("DELETE", path, params=params)
+
+    def gpg_home(self) -> str:
+        return self._gpg_home or _default_gpg_home()
+
+    def load_metadata_keys(self) -> dict[str, dict[str, t.Any]]:
+        params = {
+            "contain[metadata_private_keys]": 1,
+            "filter[deleted]": 0,
+            "filter[expired]": 0,
+        }
+        data = self.api_get("/metadata/keys.json", params=params)
+        keys = data.get("body") or []
+        LOGGER.debug(
+            f"Loaded metadata keys from API. count={len(keys)} "
+            f"filter_deleted=0 filter_expired=0"
+        )
+        if not keys:
+            data = self.api_get(
+                "/metadata/keys.json",
+                params={"contain[metadata_private_keys]": 1},
+            )
+            keys = data.get("body") or []
+            LOGGER.debug(
+                f"Loaded metadata keys from API without filters. count={len(keys)}"
+            )
+        session = self.session_info()
+        user_id = session.get("user_id")
+        gpg_home = self.gpg_home()
+
+        by_id: dict[str, dict[str, t.Any]] = {}
+        for key in keys:
+            key_id = key.get("id")
+            if not key_id:
+                continue
+            by_id[key_id] = key
+            LOGGER.debug(f"Metadata key loaded: {key_id}")
+
+            armored_key = key.get("armored_key")
+            if armored_key:
+                try:
+                    _gpg_import(armored_key, gpg_home)
+                except RuntimeError as exc:
+                    LOGGER.warning(f"Failed to import metadata public key: {exc}")
+
+            privates = key.get("metadata_private_keys") or []
+            private = next(
+                (item for item in privates if item.get("user_id") == user_id), None
+            )
+            if private and private.get("data"):
+                try:
+                    decrypted_private = _gpg_decrypt_interactive(
+                        private["data"], gpg_home
+                    )
+                except RuntimeError as exc:
+                    LOGGER.warning(f"Failed to decrypt metadata private key: {exc}")
+                    continue
+                armored_private = decrypted_private
+                try:
+                    private_payload = json.loads(decrypted_private)
+                except json.JSONDecodeError:
+                    private_payload = None
+                if isinstance(private_payload, dict) and private_payload.get("armored_key"):
+                    armored_private = str(private_payload.get("armored_key") or "")
+                if "BEGIN PGP" not in armored_private:
+                    first_line = (
+                        armored_private.splitlines()[0] if armored_private else ""
+                    )
+                    LOGGER.warning(
+                        "Skipping invalid decrypted private key for "
+                        f"metadata_key_id={key_id} first_line={first_line}"
+                    )
+                    continue
+                try:
+                    _gpg_import(armored_private, gpg_home)
+                except RuntimeError as exc:
+                    LOGGER.warning(f"Failed to import metadata private key: {exc}")
+        return by_id
+
+    def decrypt_metadata(
+        self,
+        encrypted: str,
+        metadata_key_id: str,
+        metadata_key_type: str | None,
+        metadata_keys: dict[str, dict[str, t.Any]],
+    ) -> dict[str, t.Any]:
+        if metadata_key_type != "user_key":
+            if metadata_key_id not in metadata_keys:
+                LOGGER.debug(
+                    "Metadata key missing. "
+                    f"requested={metadata_key_id} "
+                    f"type={metadata_key_type} "
+                    f"available={list(metadata_keys.keys())}"
+                )
+                raise RuntimeError(f"Metadata key {metadata_key_id} not available.")
+        raw = _gpg_decrypt_interactive(encrypted, self.gpg_home())
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {"name": raw}
+
+    def encrypt_metadata(
+        self,
+        metadata: dict[str, t.Any],
+        metadata_key_id: str | None,
+        metadata_key_type: str | None,
+        metadata_keys: dict[str, dict[str, t.Any]],
+    ) -> str:
+        session = self.session_info()
+        user_fingerprint = session.get("user_fingerprint")
+        if not user_fingerprint:
+            raise RuntimeError("Session missing user_fingerprint. Please re-login.")
+        if metadata_key_type == "user_key":
+            fingerprint = user_fingerprint
+            raw = json.dumps(metadata, separators=(",", ":"))
+            return _gpg_encrypt(raw, fingerprint, self.gpg_home())
+
+        if not metadata_key_id:
+            raise RuntimeError("Metadata key id required for shared_key metadata.")
+        key = metadata_keys.get(metadata_key_id)
+        if not key:
+            raise RuntimeError(f"Metadata key {metadata_key_id} not found.")
+        fingerprint = key.get("fingerprint")
+        if not fingerprint:
+            raise RuntimeError(f"Metadata key {metadata_key_id} missing fingerprint.")
+        raw = json.dumps(metadata, separators=(",", ":"))
+        return _gpg_encrypt_signed(raw, fingerprint, user_fingerprint, self.gpg_home())
+
+    def decrypt_secret(self, secret_data: str) -> t.Any:
+        raw = _gpg_decrypt_interactive(secret_data, self.gpg_home())
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+
+    def encrypt_secret(self, secret_value: t.Any) -> str:
+        session = self.session_info()
+        user_fingerprint = session.get("user_fingerprint")
+        if not user_fingerprint:
+            raise RuntimeError("Session missing user_fingerprint. Please re-login.")
+        if isinstance(secret_value, (dict, list)):
+            raw = json.dumps(secret_value, separators=(",", ":"))
+        else:
+            raw = str(secret_value)
+        return _gpg_encrypt(raw, user_fingerprint, self.gpg_home())
+
+    def list_resources(self) -> list[ResourceRecord]:
+        data = self.api_get("/resources.json")
+        return data.get("body") or []
+
+    def list_folders(self) -> list[FolderRecord]:
+        data = self.api_get("/folders.json")
+        folders = data.get("body") or []
+        LOGGER.debug(
+            f"Loaded folders from API. count={len(folders)}"
+        )
+        return folders
+
+    def get_resource(self, resource_id: str) -> ResourceRecord:
+        data = self.api_get(f"/resources/{resource_id}.json")
+        return data.get("body") or {}
+
+    def get_folder(self, folder_id: str) -> FolderRecord:
+        data = self.api_get(f"/folders/{folder_id}.json")
+        return data.get("body") or {}
+
+    def list_gpg_keys(self) -> list[GpgKeyRecord]:
+        data = self.api_get("/gpgkeys.json")
+        return data.get("body") or []
+
+    def user_gpg_key_id(self) -> str | None:
+        session = self.session_info()
+        user_id = session.get("user_id")
+        if not user_id:
+            return None
+        for key in self.list_gpg_keys():
+            if key.get("user_id") == user_id:
+                return key.get("id")
+        return None
+
+    def get_secret(self, resource_id: str) -> SecretRecord:
+        data = self.api_get(f"/secrets/resource/{resource_id}.json")
+        return data.get("body") or {}
+
+    def resource_types(self) -> dict[str, dict[str, t.Any]]:
+        data = self.api_get("/resource-types.json")
+        body = data.get("body") or []
+        return {item.get("id"): item for item in body if item.get("id")}
+
+    def default_resource_type(self) -> dict[str, t.Any]:
+        resource_types = self.resource_types()
+        for item in resource_types.values():
+            if item.get("default"):
+                return item
+        if resource_types:
+            return next(iter(resource_types.values()))
+        raise RuntimeError("No resource types available.")
+
+    def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
+        resources = self.list_resources()
+        metadata_keys = self.load_metadata_keys()
+        for resource in resources:
+            LOGGER.debug(
+                "Resolving resource "
+                f"id={resource.get('id')} "
+                f"metadata_key_id={resource.get('metadata_key_id')}"
+            )
+            if resource.get("id") == name_or_id:
+                return resource
+            metadata = resource.get("metadata")
+            metadata_key_id = resource.get("metadata_key_id")
+            metadata_key_type = resource.get("metadata_key_type")
+            if metadata and metadata_key_id:
+                try:
+                    meta = self.decrypt_metadata(
+                        metadata, metadata_key_id, metadata_key_type, metadata_keys
+                    )
+                except RuntimeError:
+                    continue
+                if meta.get("name") == name_or_id:
+                    return resource
+        return None
+
+    def resolve_folder(self, name_or_id: str) -> FolderRecord | None:
+        folders = self.list_folders()
+        metadata_keys = self.load_metadata_keys()
+        for folder in folders:
+            if folder.get("id") == name_or_id:
+                return folder
+            if folder.get("name") == name_or_id:
+                return folder
+            metadata = folder.get("metadata")
+            metadata_key_id = folder.get("metadata_key_id")
+            metadata_key_type = folder.get("metadata_key_type")
+            if metadata and metadata_key_id:
+                try:
+                    meta = self.decrypt_metadata(
+                        metadata, metadata_key_id, metadata_key_type, metadata_keys
+                    )
+                except RuntimeError:
+                    continue
+                if meta.get("name") == name_or_id:
+                    return folder
+        return None
+
+    def list_folder_entries(self) -> list[FolderEntry]:
+        folders = self.list_folders()
+        metadata_keys = self.load_metadata_keys()
+        entries: list[FolderEntry] = []
+        for folder in folders:
+            if folder.get("name"):
+                entries.append({"id": folder.get("id"), "name": folder.get("name")})
+                continue
+            metadata = folder.get("metadata")
+            metadata_key_id = folder.get("metadata_key_id")
+            metadata_key_type = folder.get("metadata_key_type")
+            if not metadata or not metadata_key_id:
+                continue
+            try:
+                meta = self.decrypt_metadata(
+                    metadata, metadata_key_id, metadata_key_type, metadata_keys
+                )
+            except RuntimeError as exc:
+                LOGGER.warning(
+                    f"Failed to decrypt folder metadata for id={folder.get('id')}: {exc}"
+                )
+                continue
+            entries.append({"id": folder.get("id"), "name": meta.get("name")})
+        return entries
+
+    def _resource_type_supports_uris(self, resource_type: dict[str, t.Any]) -> bool:
+        definition = resource_type.get("definition") or {}
+        resource_def = definition.get("resource") or {}
+        properties = resource_def.get("properties") or {}
+        return "uris" in properties
+
+    def _apply_uri_field(
+        self,
+        metadata: dict[str, t.Any],
+        uri: str | None,
+        resource_type: dict[str, t.Any],
+    ) -> dict[str, t.Any]:
+        if uri is None:
+            return metadata
+        if self._resource_type_supports_uris(resource_type):
+            metadata["uris"] = [uri]
+            metadata.pop("uri", None)
+        else:
+            metadata["uri"] = uri
+            metadata.pop("uris", None)
+        return metadata
+
+    def _build_v5_metadata(
+        self,
+        *,
+        name: str,
+        username: str | None,
+        uri: str | None,
+        description: str | None,
+        resource_type_id: str,
+    ) -> dict[str, t.Any]:
+        metadata: dict[str, t.Any] = {
+            "object_type": "PASSBOLT_RESOURCE_METADATA",
+            "name": name,
+            "username": username,
+            "uris": [uri] if uri else [],
+            "description": description,
+            "resource_type_id": resource_type_id,
+            "custom_fields": [],
+        }
+        return metadata
+
+    def list_password_entries(self) -> list[PasswordEntry]:
+        resources = self.list_resources()
+        metadata_keys = self.load_metadata_keys()
+        folders = {entry["id"]: entry.get("name") for entry in self.list_folder_entries()}
+        entries: list[PasswordEntry] = []
+        for resource in resources:
+            metadata = resource.get("metadata")
+            metadata_key_id = resource.get("metadata_key_id")
+            metadata_key_type = resource.get("metadata_key_type")
+            if not metadata or not metadata_key_id:
+                continue
+            try:
+                meta = self.decrypt_metadata(
+                    metadata, metadata_key_id, metadata_key_type, metadata_keys
+                )
+            except RuntimeError as exc:
+                LOGGER.warning(
+                    f"Failed to decrypt metadata for id={resource.get('id')}: {exc}"
+                )
+                continue
+            entries.append(
+                {
+                    "id": resource.get("id"),
+                    "name": meta.get("name"),
+                    "username": meta.get("username"),
+                    "uri": (meta.get("uri") or (meta.get("uris") or [None])[0]),
+                    "folder": folders.get(resource.get("folder_parent_id") or ""),
+                }
+            )
+        return entries
+
+    def get_password_field(self, name_or_id: str, field: str) -> str:
+        field = field.lower()
+        if field not in {"password", "user", "uri"}:
+            raise RuntimeError("field must be one of: password, user, uri")
+
+        resource = self.resolve_resource(name_or_id)
+        if not resource:
+            raise RuntimeError(f"Resource not found: {name_or_id}")
+
+        metadata_keys = self.load_metadata_keys()
+        metadata = {}
+        if resource.get("metadata") and resource.get("metadata_key_id"):
+            metadata = self.decrypt_metadata(
+                resource["metadata"],
+                resource["metadata_key_id"],
+                resource.get("metadata_key_type"),
+                metadata_keys,
+            )
+
+        if field == "user":
+            return str(metadata.get("username") or "")
+        if field == "uri":
+            uri_value = metadata.get("uri")
+            if not uri_value and isinstance(metadata.get("uris"), list):
+                uri_value = metadata.get("uris")[0] if metadata.get("uris") else ""
+            return str(uri_value or "")
+
+        secret = self.get_secret(resource["id"])
+        secret_data = secret.get("data")
+        if not secret_data:
+            raise RuntimeError("No secret data available for this resource.")
+        decrypted = self.decrypt_secret(secret_data)
+        if isinstance(decrypted, dict) and "password" in decrypted:
+            return str(decrypted.get("password") or "")
+        return str(decrypted)
+
+    def set_password(
+        self,
+        name: str,
+        password: str,
+        username: str | None = None,
+        uri: str | None = None,
+        folder: str | None = None,
+    ) -> str:
+        resource = self.resolve_resource(name)
+        if resource:
+            return self.update_password(
+                resource["id"], password, username=username, uri=uri
+            )
+        return self.create_password(
+            name, password, username=username, uri=uri, folder=folder
+        )
+
+    def create_password(
+        self,
+        name: str,
+        password: str,
+        username: str | None = None,
+        uri: str | None = None,
+        folder: str | None = None,
+    ) -> str:
+        metadata_keys = self.load_metadata_keys()
+        LOGGER.debug(
+            f"create_password metadata_keys_count={len(metadata_keys)} "
+            f"metadata_key_ids={list(metadata_keys.keys())}"
+        )
+        resource_types = self.resource_types()
+        resource_type = self.default_resource_type()
+        if resource_type.get("slug") and not str(resource_type.get("slug")).startswith(
+            "v5-"
+        ):
+            v5_default = next(
+                (rt for rt in resource_types.values() if rt.get("slug") == "v5-default"),
+                None,
+            )
+            if v5_default:
+                resource_type = v5_default
+
+        if not metadata_keys:
+            raise RuntimeError("No metadata keys available for creation.")
+
+        metadata_key_id = next(iter(metadata_keys.keys()))
+        metadata_key_type = "shared_key"
+
+        preferred_folder_parent_id: str | None = None
+        if folder:
+            resolved_folder = self.resolve_folder(folder)
+            if not resolved_folder or not resolved_folder.get("id"):
+                raise RuntimeError(f"Folder not found: {folder}")
+            preferred_folder_parent_id = resolved_folder.get("id")
+
+        description = None
+        metadata = self._build_v5_metadata(
+            name=name,
+            username=username,
+            uri=uri,
+            description=description,
+            resource_type_id=resource_type["id"],
+        )
+        encrypted_metadata = self.encrypt_metadata(
+            metadata, metadata_key_id, metadata_key_type, metadata_keys
+        )
+
+        session = self.session_info()
+        user_id = session.get("user_id")
+        if not user_id:
+            raise RuntimeError("Session missing user_id. Please re-login.")
+        secret_data = {
+            "object_type": "PASSBOLT_SECRET_DATA",
+            "password": password,
+            "description": description,
+            "custom_fields": [],
+        }
+        encrypted_secret = self.encrypt_secret(secret_data)
+
+        payload: dict[str, t.Any] = {
+            "metadata": encrypted_metadata,
+            "metadata_key_id": metadata_key_id,
+            "metadata_key_type": metadata_key_type,
+            "resource_type_id": resource_type["id"],
+            "secrets": [{"data": encrypted_secret, "user_id": user_id}],
+        }
+        if preferred_folder_parent_id:
+            payload["folder_parent_id"] = preferred_folder_parent_id
+        created = self.api_post("/resources.json", payload=payload)
+        body = created.get("body") or {}
+        return str(body.get("id") or "")
+
+    def update_password(
+        self,
+        name_or_id: str,
+        password: str,
+        username: str | None = None,
+        uri: str | None = None,
+    ) -> str:
+        resource = self.resolve_resource(name_or_id)
+        if not resource:
+            raise RuntimeError(f"Resource not found: {name_or_id}")
+
+        metadata_keys = self.load_metadata_keys()
+        metadata = self.decrypt_metadata(
+            resource["metadata"],
+            resource["metadata_key_id"],
+            resource.get("metadata_key_type"),
+            metadata_keys,
+        )
+        if username is not None:
+            metadata["username"] = username
+        resource_types = self.resource_types()
+        resource_type = resource_types.get(resource["resource_type_id"]) or {}
+        metadata = self._apply_uri_field(metadata, uri, resource_type)
+        encrypted_metadata = self.encrypt_metadata(
+            metadata,
+            resource["metadata_key_id"],
+            resource.get("metadata_key_type"),
+            metadata_keys,
+        )
+
+        secret = self.get_secret(resource["id"])
+        secret_id = secret.get("id")
+        if not secret_id:
+            raise RuntimeError("Unable to determine secret id for update.")
+
+        existing_secret = None
+        if secret.get("data"):
+            existing_secret = self.decrypt_secret(secret["data"])
+
+        if isinstance(existing_secret, dict):
+            existing_secret["password"] = password
+            secret_payload = existing_secret
+        else:
+            secret_payload = password
+
+        encrypted_secret = self.encrypt_secret(secret_payload)
+        session = self.session_info()
+        user_id = session.get("user_id")
+        if not user_id:
+            raise RuntimeError("Session missing user_id. Please re-login.")
+        payload = {
+            "metadata": encrypted_metadata,
+            "metadata_key_id": resource["metadata_key_id"],
+            "metadata_key_type": resource["metadata_key_type"],
+            "resource_type_id": resource["resource_type_id"],
+            "secrets": [{"id": secret_id, "data": encrypted_secret, "user_id": user_id}],
+        }
+        self.api_put(f"/resources/{resource['id']}.json", payload=payload)
+        return str(resource["id"])
+
+    def delete_password(self, name_or_id: str) -> str:
+        resource = self.resolve_resource(name_or_id)
+        if not resource:
+            raise RuntimeError(f"Resource not found: {name_or_id}")
+        self.api_delete(f"/resources/{resource['id']}.json")
+        return str(resource["id"])
 
     def verify(self) -> dict[str, t.Any]:
         return self.request("GET", "/auth/verify.json")
@@ -454,7 +1091,7 @@ def _gpg_env(gpg_home: str | None) -> dict[str, str]:
     try:
         gpg_path.chmod(0o700)
     except OSError as exc:
-        LOGGER.warning("Failed to set permissions on GNUPGHOME: %s", exc)
+        LOGGER.warning(f"Failed to set permissions on GNUPGHOME: {exc}")
 
     env["GNUPGHOME"] = gpg_home
     return env
@@ -548,6 +1185,26 @@ def _gpg_encrypt(message: str, recipient: str, gpg_home: str | None) -> str:
             "always",
             "--recipient",
             recipient,
+            "--encrypt",
+        ],
+        message,
+        gpg_home,
+    )
+
+
+def _gpg_encrypt_signed(
+    message: str, recipient: str, signer: str, gpg_home: str | None
+) -> str:
+    return _run_gpg(
+        [
+            "--armor",
+            "--trust-model",
+            "always",
+            "--local-user",
+            signer,
+            "--recipient",
+            recipient,
+            "--sign",
             "--encrypt",
         ],
         message,
