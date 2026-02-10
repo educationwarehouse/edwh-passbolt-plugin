@@ -76,7 +76,7 @@ def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
     elif import_mode == "paste":
         import_key = _read_key_block()
     passphrase = (
-        getpass("GPG passphrase (leave empty if key has none): ").strip() or None
+        getpass("Passbolt/GPG passphrase: ").strip() or None
     )
     return host, user_id, import_key, passphrase
 
@@ -117,7 +117,7 @@ def login(
         host, user_id, import_key, passphrase = _prompt_login_inputs()
     if passphrase is None:
         passphrase = (
-            getpass("GPG passphrase (leave empty if key has none): ").strip() or None
+            getpass("Passbolt/GPG passphrase: ").strip() or None
         )
 
     if not host or not user_id:

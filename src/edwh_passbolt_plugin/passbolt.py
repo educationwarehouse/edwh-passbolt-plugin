@@ -372,6 +372,7 @@ class Passbolt:
         session = _load_session()
         if not session:
             raise RuntimeError("Not logged in. Run `edwh passbolt.login` first.")
+
         self._session_info = session
         return session
 
@@ -537,6 +538,30 @@ class Passbolt:
         except json.JSONDecodeError:
             return {"name": raw}
 
+    def _try_decrypt_metadata(
+        self,
+        record: dict[str, t.Any],
+        metadata_keys: dict[str, MetadataKeyRecord],
+    ) -> dict[str, t.Any] | None:
+        metadata = record.get("metadata")
+        metadata_key_id = record.get("metadata_key_id")
+        metadata_key_type = record.get("metadata_key_type")
+        if not metadata or not metadata_key_id:
+            return None
+        try:
+            return self.decrypt_metadata(
+                metadata,
+                metadata_key_id,
+                metadata_key_type,
+                metadata_keys,
+            )
+        except RuntimeError as exc:
+            LOGGER.warning(
+                "Failed to decrypt metadata for "
+                f"id={record.get('id')} key_id={metadata_key_id}: {exc}",
+            )
+            return None
+
     def encrypt_metadata(
         self,
         metadata: dict[str, t.Any],
@@ -673,21 +698,9 @@ class Passbolt:
             )
             if resource.get("id") == name_or_id:
                 return resource
-            metadata = resource.get("metadata")
-            metadata_key_id = resource.get("metadata_key_id")
-            metadata_key_type = resource.get("metadata_key_type")
-            if metadata and metadata_key_id:
-                try:
-                    meta = self.decrypt_metadata(
-                        metadata,
-                        metadata_key_id,
-                        metadata_key_type,
-                        metadata_keys,
-                    )
-                except RuntimeError:
-                    continue
-                if meta.get("name") == name_or_id:
-                    return resource
+            meta = self._try_decrypt_metadata(resource, metadata_keys)
+            if meta and meta.get("name") == name_or_id:
+                return resource
         return None
 
     def resolve_folder(self, name_or_id: str) -> FolderRecord | None:
@@ -699,22 +712,9 @@ class Passbolt:
                 return folder
             if folder.get("name") == name_or_id:
                 return folder
-
-            metadata = folder.get("metadata")
-            metadata_key_id = folder.get("metadata_key_id")
-            metadata_key_type = folder.get("metadata_key_type")
-            if metadata and metadata_key_id:
-                try:
-                    meta = self.decrypt_metadata(
-                        metadata,
-                        metadata_key_id,
-                        metadata_key_type,
-                        metadata_keys,
-                    )
-                except RuntimeError:
-                    continue
-                if meta.get("name") == name_or_id:
-                    return folder
+            meta = self._try_decrypt_metadata(folder, metadata_keys)
+            if meta and meta.get("name") == name_or_id:
+                return folder
         return None
 
     def list_folder_entries(self) -> list[FolderEntry]:
@@ -726,22 +726,11 @@ class Passbolt:
             if folder.get("name"):
                 entries.append({"id": folder["id"], "name": folder.get("name")})
                 continue
-
-            metadata = folder.get("metadata")
-            metadata_key_id = folder.get("metadata_key_id")
-            metadata_key_type = folder.get("metadata_key_type")
-            if not metadata or not metadata_key_id:
-                continue
-            try:
-                meta = self.decrypt_metadata(
-                    metadata,
-                    metadata_key_id,
-                    metadata_key_type,
-                    metadata_keys,
-                )
-            except RuntimeError as exc:
+            meta = self._try_decrypt_metadata(folder, metadata_keys)
+            if not meta:
                 LOGGER.warning(
-                    f"Failed to decrypt folder metadata for id={folder.get('id')}: {exc}",
+                    "Failed to decrypt folder metadata for "
+                    f"id={folder.get('id')}",
                 )
                 continue
             entries.append({"id": folder["id"], "name": meta.get("name")})
@@ -808,21 +797,10 @@ class Passbolt:
         current_user_id = session.get("user_id")
         entries: list[PasswordEntry] = []
         for resource in resources:
-            metadata = resource.get("metadata")
-            metadata_key_id = resource.get("metadata_key_id")
-            metadata_key_type = resource.get("metadata_key_type")
-            if not metadata or not metadata_key_id:
-                continue
-            try:
-                meta = self.decrypt_metadata(
-                    metadata,
-                    metadata_key_id,
-                    metadata_key_type,
-                    metadata_keys,
-                )
-            except RuntimeError as exc:
+            meta = self._try_decrypt_metadata(resource, metadata_keys)
+            if not meta:
                 LOGGER.warning(
-                    f"Failed to decrypt metadata for id={resource.get('id')}: {exc}",
+                    f"Failed to decrypt metadata for id={resource.get('id')}",
                 )
                 continue
 
@@ -1389,8 +1367,7 @@ class Passbolt:
 
         session = self.session_info
         user_id = session.get("user_id")
-        if not user_id:
-            raise RuntimeError("Session missing user_id. Please re-login.")
+
         secret_data = {
             "object_type": "PASSBOLT_SECRET_DATA",
             "password": password,
@@ -1462,8 +1439,7 @@ class Passbolt:
         encrypted_secret = self.encrypt_secret(secret_payload)
         session = self.session_info
         user_id = session.get("user_id")
-        if not user_id:
-            raise RuntimeError("Session missing user_id. Please re-login.")
+
         payload = {
             "metadata": encrypted_metadata,
             "metadata_key_id": resource["metadata_key_id"],
@@ -1813,7 +1789,7 @@ def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
         if _is_non_passphrase_error(str(exc)):
             raise
 
-    passphrase = getpass("GPG passphrase: ").strip()
+    passphrase = getpass("Passbolt/GPG passphrase: ").strip()
     if not passphrase:
         raise RuntimeError("GPG passphrase is required to decrypt.")
 
