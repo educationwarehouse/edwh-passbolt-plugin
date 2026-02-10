@@ -9,6 +9,8 @@ class PasswordEntry(t.TypedDict):
     username: str | None
     uri: str | None
     folder: str | None
+    shared_users: int | None
+    shared_groups: int | None
 
 
 class SearchResultEntry(t.TypedDict):
@@ -35,6 +37,30 @@ class ResourceRecord(t.TypedDict, total=False):
     expired: str | None
     folder_parent_id: str | None
     personal: bool
+    permissions: list["PermissionRecord"]
+
+
+class PermissionRecord(t.TypedDict, total=False):
+    id: str
+    aro: str
+    aro_foreign_key: str
+    type: int
+    user: "UserRecord"
+    group: "GroupRecord"
+
+
+class UserProfileRecord(t.TypedDict, total=False):
+    first_name: str
+    last_name: str
+
+
+class UserRecord(t.TypedDict, total=False):
+    id: str
+    username: str
+    active: bool
+    deleted: bool
+    profile: UserProfileRecord
+    gpgkey: "GpgKeyRecord"
 
 
 class FolderRecord(t.TypedDict, total=False):
@@ -65,6 +91,17 @@ class GpgKeyRecord(t.TypedDict, total=False):
     user_id: str
     armored_key: str
     fingerprint: str
+
+
+class GroupUserRecord(t.TypedDict, total=False):
+    user_id: str
+    user: UserRecord
+
+
+class GroupRecord(t.TypedDict, total=False):
+    id: str
+    name: str
+    groups_users: list[GroupUserRecord]
 
 
 class Tokens(t.TypedDict):

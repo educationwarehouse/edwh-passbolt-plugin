@@ -151,7 +151,10 @@ def logout(c: Context) -> None:
 def list_passwords(_: Context, folder: str | None = None) -> None:
     """List available passwords (optionally filtered)."""
     client = Passbolt.from_session()
-    entries = with_spinner(client.list_password_entries, text="Loading passwords...")
+    entries = with_spinner(
+        lambda: client.list_password_entries(include_shares=True),
+        text="Loading passwords...",
+    )
 
     if folder:
         folder_lower = folder.lower()
@@ -167,13 +170,18 @@ def list_passwords(_: Context, folder: str | None = None) -> None:
     table.add_column("Username")
     table.add_column("URI")
     table.add_column("Folder")
+    table.add_column("Shared")
     for entry in entries:
+        shared_users = int(entry.get("shared_users") or 0)
+        shared_groups = int(entry.get("shared_groups") or 0)
+        shared_label = f"U:{shared_users} G:{shared_groups}"
         table.add_row(
             str(entry.get("id") or ""),
             str(entry.get("name") or ""),
             str(entry.get("username") or ""),
             str(entry.get("uri") or ""),
             str(entry.get("folder") or ""),
+            shared_label,
         )
     rprint(table)
 
@@ -314,6 +322,125 @@ def delete_password(_: Context, name: str) -> None:
         text="Deleting password...",
     )
     print(resource_id)
+
+
+def _parse_labels(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _permission_level(value: str) -> int:
+    raw = value.strip().lower()
+    if raw in {"1", "read", "reader"}:
+        return 1
+    if raw in {"7", "update", "write", "editor"}:
+        return 7
+    if raw in {"15", "owner", "admin"}:
+        return 15
+    raise RuntimeError("permission must be one of: read, update, owner (or 1/7/15)")
+
+
+def _join_with_and(values: list[str]) -> str:
+    items = [item.strip() for item in values if item and item.strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
+@task(
+    help={
+        "name": "Entry name or ID",
+        "user": "User name or username/email (comma-separated for multiple)",
+        "group": "Group name (comma-separated for multiple)",
+        "permission": "Permission level: read|update|owner (default: read)",
+    },
+    pre=[ensure_logged_in],
+    name="share",
+    aliases=("share-password",),
+)
+def share_password(
+    _: Context,
+    name: str,
+    user: str | None = None,
+    group: str | None = None,
+    permission: str = "read",
+) -> None:
+    """Share a password with users or groups by friendly name."""
+    users = _parse_labels(user)
+    groups = _parse_labels(group)
+    if not users and not groups:
+        raise RuntimeError("Provide at least one --user or --group.")
+    level = _permission_level(permission)
+    client = Passbolt.from_session()
+    result = with_spinner(
+        lambda: client.share_resource(
+            name,
+            users=users,
+            groups=groups,
+            permission=level,
+        ),
+        text="Sharing password...",
+    )
+    if result and isinstance(result, dict) and result.get("status") == "noop":
+        print(result.get("message") or "No new users or groups to share.")
+        return
+    shared_labels = []
+    if isinstance(result, dict):
+        shared_labels = t.cast(list[str], result.get("shared_labels") or [])
+    label = _join_with_and(shared_labels or [*users, *groups])
+    if label:
+        print(f"Shared with {label}")
+    else:
+        print("Shared.")
+
+
+@task(
+    help={
+        "name": "Entry name or ID",
+        "user": "User name or username/email (comma-separated for multiple)",
+        "group": "Group name (comma-separated for multiple)",
+    },
+    pre=[ensure_logged_in],
+    name="unshare",
+    aliases=("unshare-password",),
+)
+def unshare_password(
+    _: Context,
+    name: str,
+    user: str | None = None,
+    group: str | None = None,
+) -> None:
+    """Unshare a password with users or groups by friendly name."""
+    users = _parse_labels(user)
+    groups = _parse_labels(group)
+    client = Passbolt.from_session()
+    result = with_spinner(
+        lambda: client.unshare_resource(
+            name,
+            users=users,
+            groups=groups,
+        ),
+        text="Unsharing password...",
+    )
+    if result and isinstance(result, dict) and result.get("status") == "noop":
+        print(result.get("message") or "No matching shares to remove.")
+        return
+    if not users and not groups:
+        print("Unshared with everyone.")
+        return
+    removed_labels = []
+    if isinstance(result, dict):
+        removed_labels = t.cast(list[str], result.get("removed_labels") or [])
+    label = _join_with_and(removed_labels or [*users, *groups])
+    if label:
+        print(f"Unshared with {label}")
+    else:
+        print("Unshared.")
 
 
 # @task(help={"name": "Entry name or ID"}, pre=[ensure_logged_in])

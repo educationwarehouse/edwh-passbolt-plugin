@@ -50,6 +50,8 @@ edwh passbolt.set [--name ...] [--password ...] [--username ...] [--uri ...] [--
 edwh passbolt.search <term> [--limit 10] [--threshold 70]
 edwh passbolt.list-folders
 edwh passbolt.delete <name-or-id>
+edwh passbolt.share <name-or-id> [--user "Alice, Bob"] [--group "Admins"] [--permission read|update|owner]
+edwh passbolt.unshare <name-or-id> [--user "Alice, Bob"] [--group "Admins"]
 ```
 
 For full command listings and help text:

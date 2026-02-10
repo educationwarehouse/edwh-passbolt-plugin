@@ -20,12 +20,13 @@ from rapidfuzz import fuzz, process
 from .types import (
     FolderEntry,
     FolderRecord,
-    GpgKeyRecord,
+    GroupRecord,
     JwtPayload,
     LoginTokens,
     MetadataKeyRecord,
     PassboltApiResponse,
     PasswordEntry,
+    PermissionRecord,
     RefreshTokens,
     ResourceRecord,
     ResourceTypeRecord,
@@ -34,6 +35,7 @@ from .types import (
     SessionData,
     SessionValidation,
     Tokens,
+    UserRecord,
 )
 
 
@@ -179,9 +181,11 @@ class Passbolt:
         self._client = httpx.Client(timeout=timeout)
         self._gpg_home = gpg_home
         self._session_tokens: Tokens | None = None
+        self._session_info: SessionData | None = None
 
     @classmethod
     def from_session(cls) -> "Passbolt":
+        """Build a client using cached session credentials."""
         session = _load_session()
         if not session:
             raise RuntimeError(
@@ -197,6 +201,7 @@ class Passbolt:
         if not host:
             raise RuntimeError("Session is missing host. Please re-login.")
         client = cls(host, gpg_home=session.get("gpg_home"))
+        client._session_info = session
         client._session_tokens = _decrypt_tokens(encrypted, session.get("gpg_home"))
         return client
 
@@ -211,6 +216,7 @@ class Passbolt:
         verify_expiry: int,
         gpg_home: str | None = None,
     ) -> "Passbolt":
+        """Login with GPG key material and persist a local session."""
         client = cls(host, gpg_home=gpg_home)
         tokens = client.login_jwt(user_id, import_key, passphrase, verify_expiry)
         client.save_session(
@@ -219,10 +225,12 @@ class Passbolt:
             user_fingerprint=tokens["user_fingerprint"],
             warm_agent=True,
         )
+        client._session_info = _load_session()
         return client
 
     @classmethod
     def validate_session(cls, verify_remote: bool = True) -> SessionValidation:
+        """Validate cached tokens and optionally verify against the server."""
         client = cls.from_session()
         session = _load_session()
         tokens = client._session_tokens
@@ -273,6 +281,7 @@ class Passbolt:
 
     @classmethod
     def clear_session(cls) -> None:
+        """Remove the cached session file."""
         _session_path().unlink(missing_ok=True)
 
     def save_session(
@@ -283,6 +292,7 @@ class Passbolt:
         user_fingerprint: str,
         warm_agent: bool = False,
     ) -> None:
+        """Encrypt and store session tokens locally."""
         _save_secure_session(
             tokens=tokens,
             user_id=user_id,
@@ -290,6 +300,7 @@ class Passbolt:
             gpg_home=self._gpg_home,
             user_fingerprint=user_fingerprint,
         )
+        self._session_info = _load_session()
         if warm_agent:
             encrypted = (
                 _load_session().get("encrypted_tokens") if _load_session() else None
@@ -301,6 +312,7 @@ class Passbolt:
                     LOGGER.warning(f"Failed to warm GPG agent cache: {exc}")
 
     def close(self) -> None:
+        """Close the underlying HTTP client."""
         self._client.close()
 
     def __del__(self) -> None:
@@ -313,6 +325,7 @@ class Passbolt:
         payload: dict[str, t.Any] | None = None,
         headers: dict[str, str] | None = None,
     ) -> PassboltApiResponse:
+        """Perform a raw HTTP request against the Passbolt API."""
         url = f"{self.base_url}{path}"
         request_headers = {
             "Accept": "application/json",
@@ -350,13 +363,20 @@ class Passbolt:
         except httpx.RequestError as exc:
             raise RuntimeError(f"Network error calling {url}: {exc}") from exc
 
+    @property
     def session_info(self) -> SessionData:
+        """Return the cached session metadata."""
+        if self._session_info:
+            return self._session_info
+
         session = _load_session()
         if not session:
             raise RuntimeError("Not logged in. Run `edwh passbolt.login` first.")
+        self._session_info = session
         return session
 
     def access_token(self) -> str:
+        """Return a valid access token from the cached session."""
         return self.validate_session(verify_remote=False)["access_token"]
 
     def _auth_headers(self) -> dict[str, str]:
@@ -382,6 +402,7 @@ class Passbolt:
         path: str,
         params: dict[str, t.Any] | None = None,
     ) -> PassboltApiResponse:
+        """Issue an authenticated GET request."""
         return self._api_request("GET", path, params=params)
 
     def api_post(
@@ -390,6 +411,7 @@ class Passbolt:
         payload: dict[str, t.Any],
         params: dict[str, t.Any] | None = None,
     ) -> PassboltApiResponse:
+        """Issue an authenticated POST request."""
         return self._api_request("POST", path, payload=payload, params=params)
 
     def api_put(
@@ -398,6 +420,7 @@ class Passbolt:
         payload: dict[str, t.Any],
         params: dict[str, t.Any] | None = None,
     ) -> PassboltApiResponse:
+        """Issue an authenticated PUT request."""
         return self._api_request("PUT", path, payload=payload, params=params)
 
     def api_delete(
@@ -405,12 +428,15 @@ class Passbolt:
         path: str,
         params: dict[str, t.Any] | None = None,
     ) -> PassboltApiResponse:
+        """Issue an authenticated DELETE request."""
         return self._api_request("DELETE", path, params=params)
 
     def gpg_home(self) -> str:
+        """Return the GNUPGHOME directory used for GPG operations."""
         return self._gpg_home or _default_gpg_home()
 
     def load_metadata_keys(self) -> dict[str, MetadataKeyRecord]:
+        """Load available metadata keys for encrypting/decrypting metadata."""
         params = {
             "contain[metadata_private_keys]": 1,
             "filter[deleted]": 0,
@@ -431,7 +457,7 @@ class Passbolt:
             LOGGER.debug(
                 f"Loaded metadata keys from API without filters. count={len(keys)}",
             )
-        session = self.session_info()
+        session = self.session_info
         user_id = session.get("user_id")
         gpg_home = self.gpg_home()
 
@@ -495,6 +521,7 @@ class Passbolt:
         metadata_key_type: str | None,
         metadata_keys: dict[str, MetadataKeyRecord],
     ) -> dict[str, t.Any]:
+        """Decrypt resource/folder metadata using the correct key."""
         if metadata_key_type != "user_key":
             if metadata_key_id not in metadata_keys:
                 LOGGER.debug(
@@ -517,7 +544,8 @@ class Passbolt:
         metadata_key_type: str | None,
         metadata_keys: dict[str, MetadataKeyRecord],
     ) -> str:
-        session = self.session_info()
+        """Encrypt resource/folder metadata for the selected key."""
+        session = self.session_info
         user_fingerprint = session.get("user_fingerprint")
         if not user_fingerprint:
             raise RuntimeError("Session missing user_fingerprint. Please re-login.")
@@ -538,6 +566,7 @@ class Passbolt:
         return _gpg_encrypt_signed(raw, fingerprint, user_fingerprint, self.gpg_home())
 
     def decrypt_secret(self, secret_data: str) -> t.Any:
+        """Decrypt secret payload for the current user."""
         raw = _gpg_decrypt_interactive(secret_data, self.gpg_home())
         try:
             return json.loads(raw)
@@ -545,7 +574,8 @@ class Passbolt:
             return raw
 
     def encrypt_secret(self, secret_value: t.Any) -> str:
-        session = self.session_info()
+        """Encrypt secret payload for the current user."""
+        session = self.session_info
         user_fingerprint = session.get("user_fingerprint")
         if not user_fingerprint:
             raise RuntimeError("Session missing user_fingerprint. Please re-login.")
@@ -555,50 +585,74 @@ class Passbolt:
             raw = str(secret_value)
         return _gpg_encrypt(raw, user_fingerprint, self.gpg_home())
 
-    def list_resources(self) -> list[ResourceRecord]:
-        data = self.api_get("/resources.json")
+    def list_resources(
+        self, *, include_permissions: bool = False
+    ) -> list[ResourceRecord]:
+        """List resources, optionally including permissions."""
+        params = {}
+        if include_permissions:
+            params["contain[permissions]"] = 1
+        data = self.api_get("/resources.json", params=params)
         return data.get("body") or []
 
     def list_folders(self) -> list[FolderRecord]:
+        """List folders from the API."""
         data = self.api_get("/folders.json")
         folders = data.get("body") or []
         LOGGER.debug(f"Loaded folders from API. count={len(folders)}")
         return folders
 
-    def get_resource(self, resource_id: str) -> ResourceRecord:
-        data = self.api_get(f"/resources/{resource_id}.json")
+    def get_resource_with_permissions(self, resource_id: str) -> ResourceRecord:
+        """Fetch a resource including its permissions details."""
+        params = {
+            "contain[permissions]": 1,
+            "contain[permissions.user.profile]": 1,
+            "contain[permissions.group]": 1,
+        }
+        data = self.api_get(f"/resources/{resource_id}.json", params=params)
         return data.get("body") or {}
 
-    def get_folder(self, folder_id: str) -> FolderRecord:
-        data = self.api_get(f"/folders/{folder_id}.json")
+    def get_group_with_users(self, group_id: str) -> GroupRecord:
+        """Fetch a group including member users."""
+        params = {
+            "contain[groups_users.user]": 1,
+            "contain[groups_users.user.profile]": 1,
+            "contain[groups_users.user.gpgkey]": 1,
+        }
+        data = self.api_get(f"/groups/{group_id}.json", params=params)
         return data.get("body") or {}
 
-    def list_gpg_keys(self) -> list[GpgKeyRecord]:
-        data = self.api_get("/gpgkeys.json")
+    def search_share_aros(
+        self,
+        search: str,
+        *,
+        include_profile: bool = True,
+        include_gpgkey: bool = True,
+    ) -> list[dict[str, t.Any]]:
+        """Search share AROs (Access Request Objects) like users and groups."""
+        params: dict[str, t.Any] = {"filter[search]": search}
+        if include_profile:
+            params["contain[profile]"] = 1
+        if include_gpgkey:
+            params["contain[gpgkey]"] = 1
+        data = self.api_get("/share/search-aros.json", params=params)
         return data.get("body") or []
 
-    def user_gpg_key_id(self) -> str | None:
-        session = self.session_info()
-        user_id = session.get("user_id")
-        if not user_id:
-            return None
-        for key in self.list_gpg_keys():
-            if key.get("user_id") == user_id:
-                return key.get("id")
-        return None
-
     def get_secret(self, resource_id: str) -> SecretRecord:
+        """Fetch the encrypted secret for a resource."""
         data = self.api_get(f"/secrets/resource/{resource_id}.json")
         return data.get("body") or {}
 
     @cached_property
     def resource_types(self) -> dict[str, ResourceTypeRecord]:
+        """Return resource types indexed by id."""
         data = self.api_get("/resource-types.json")
         body = data.get("body") or []
         return {item.get("id"): item for item in body if item.get("id")}
 
     @cached_property
     def default_resource_type(self) -> ResourceTypeRecord:
+        """Return the default resource type."""
         resource_types = self.resource_types
         for item in resource_types.values():
             if item.get("default"):
@@ -608,6 +662,7 @@ class Passbolt:
         raise RuntimeError("No resource types available.")
 
     def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
+        """Resolve a resource by id or decrypted name."""
         resources = self.list_resources()
         metadata_keys = self.load_metadata_keys()
         for resource in resources:
@@ -636,6 +691,7 @@ class Passbolt:
         return None
 
     def resolve_folder(self, name_or_id: str) -> FolderRecord | None:
+        """Resolve a folder by id or decrypted name."""
         folders = self.list_folders()
         metadata_keys = self.load_metadata_keys()
         for folder in folders:
@@ -662,6 +718,7 @@ class Passbolt:
         return None
 
     def list_folder_entries(self) -> list[FolderEntry]:
+        """List folder ids and names, decrypting metadata when needed."""
         folders = self.list_folders()
         metadata_keys = self.load_metadata_keys()
         entries: list[FolderEntry] = []
@@ -733,14 +790,22 @@ class Passbolt:
         }
         return metadata
 
-    def list_password_entries(self, include_folder: bool = True) -> list[PasswordEntry]:
-        resources = self.list_resources()
+    def list_password_entries(
+        self,
+        *,
+        include_folder: bool = True,
+        include_shares: bool = False,
+    ) -> list[PasswordEntry]:
+        """List decrypted password metadata and optional share counts."""
+        resources = self.list_resources(include_permissions=include_shares)
         metadata_keys = self.load_metadata_keys()
         folders: dict[str, str | None] = {}
         if include_folder:
             folders = {
                 entry["id"]: entry.get("name") for entry in self.list_folder_entries()
             }
+        session = self.session_info
+        current_user_id = session.get("user_id")
         entries: list[PasswordEntry] = []
         for resource in resources:
             metadata = resource.get("metadata")
@@ -761,6 +826,28 @@ class Passbolt:
                 )
                 continue
 
+            shared_users: int | None = None
+            shared_groups: int | None = None
+            if include_shares:
+                perms = t.cast(
+                    list[PermissionRecord], resource.get("permissions") or []
+                )
+                user_ids: set[str] = set()
+                group_ids: set[str] = set()
+                for perm in perms:
+                    aro = str(perm.get("aro") or "")
+                    aro_id = str(perm.get("aro_foreign_key") or "")
+                    if not aro_id:
+                        continue
+                    if aro.lower() == "user":
+                        if current_user_id and aro_id == current_user_id:
+                            continue
+                        user_ids.add(aro_id)
+                    elif aro.lower() == "group":
+                        group_ids.add(aro_id)
+                shared_users = len(user_ids)
+                shared_groups = len(group_ids)
+
             entries.append(
                 {
                     "id": resource["id"],
@@ -772,6 +859,8 @@ class Passbolt:
                         if include_folder
                         else None
                     ),
+                    "shared_users": shared_users,
+                    "shared_groups": shared_groups,
                 }
             )
         return entries
@@ -784,6 +873,7 @@ class Passbolt:
         threshold: int = 70,
         include_passwords: bool = False,
     ) -> list[SearchResultEntry]:
+        """Fuzzy-search passwords by name/username/uri."""
         entries = self.list_password_entries(include_folder=False)
         choices: dict[str, PasswordEntry] = {}
         for entry in entries:
@@ -834,7 +924,351 @@ class Passbolt:
             )
         return output
 
+    def _normalize_label(self, value: str) -> str:
+        return " ".join(value.strip().lower().split())
+
+    def _user_labels(self, user: UserRecord) -> list[str]:
+        labels: list[str] = []
+        username = str(user.get("username") or "").strip()
+        if username:
+            labels.append(username)
+        profile = user.get("profile") or {}
+        first = str(profile.get("first_name") or "").strip()
+        last = str(profile.get("last_name") or "").strip()
+        full = " ".join(part for part in (first, last) if part).strip()
+        if full:
+            labels.append(full)
+        return labels
+
+    def _group_labels(self, group: GroupRecord) -> list[str]:
+        labels: list[str] = []
+        name = str(group.get("name") or "").strip()
+        if name:
+            labels.append(name)
+        return labels
+
+    def format_user_display(self, user: UserRecord) -> str:
+        """Format a user as 'First Last (email)' with sensible fallbacks."""
+        profile = user.get("profile") or {}
+        first = str(profile.get("first_name") or "").strip()
+        last = str(profile.get("last_name") or "").strip()
+        full = " ".join(part for part in (first, last) if part).strip()
+        username = str(user.get("username") or "").strip()
+        if full and username:
+            return f"{full} ({username})"
+        if full:
+            return full
+        return username or str(user.get("id") or "")
+
+    def format_group_display(self, group: GroupRecord) -> str:
+        """Format a group name with fallback to id."""
+        name = str(group.get("name") or "").strip()
+        return name or str(group.get("id") or "")
+
+    def _select_unique_match(
+        self,
+        label: str,
+        candidates: list[dict[str, t.Any]],
+        kind: str,
+    ) -> dict[str, t.Any]:
+        if not candidates:
+            raise RuntimeError(f"No {kind} found matching: {label}")
+        if len(candidates) == 1:
+            return candidates[0]
+        normalized = self._normalize_label(label)
+        exact: list[dict[str, t.Any]] = []
+        for candidate in candidates:
+            if kind == "user":
+                labels = self._user_labels(t.cast(UserRecord, candidate))
+            else:
+                labels = self._group_labels(t.cast(GroupRecord, candidate))
+            if any(self._normalize_label(item) == normalized for item in labels):
+                exact.append(candidate)
+        if len(exact) == 1:
+            return exact[0]
+        options: list[str] = []
+        for candidate in candidates:
+            if kind == "user":
+                labels = self._user_labels(t.cast(UserRecord, candidate))
+                label_str = (
+                    " / ".join(labels) if labels else str(candidate.get("id") or "")
+                )
+            else:
+                label_str = str(candidate.get("name") or candidate.get("id") or "")
+            options.append(label_str)
+        raise RuntimeError(
+            f"Multiple {kind}s match '{label}': {', '.join(options)}",
+        )
+
+    def resolve_user(self, label: str) -> UserRecord:
+        """Resolve a user by friendly label (name or email), raising on ambiguity."""
+        results = self.search_share_aros(
+            label,
+            include_profile=True,
+            include_gpgkey=True,
+        )
+        users = [r for r in results if r.get("username")]
+        return t.cast(UserRecord, self._select_unique_match(label, users, "user"))
+
+    def resolve_group(self, label: str) -> GroupRecord:
+        """Resolve a group by friendly label, raising on ambiguity."""
+        results = self.search_share_aros(
+            label,
+            include_profile=False,
+            include_gpgkey=False,
+        )
+        groups = [r for r in results if r.get("name") and not r.get("username")]
+        return t.cast(GroupRecord, self._select_unique_match(label, groups, "group"))
+
+    def encrypt_secret_for_fingerprint(
+        self, secret_value: t.Any, fingerprint: str
+    ) -> str:
+        """Encrypt secret data for a specific recipient fingerprint."""
+        if isinstance(secret_value, (dict, list)):
+            raw = json.dumps(secret_value, separators=(",", ":"))
+        else:
+            raw = str(secret_value)
+        return _gpg_encrypt(raw, fingerprint, self.gpg_home())
+
+    def share_resource(
+        self,
+        name_or_id: str,
+        *,
+        users: list[str] | None = None,
+        groups: list[str] | None = None,
+        permission: int = 1,
+    ) -> dict[str, t.Any]:
+        """Share a resource with users/groups by friendly name, returning display labels."""
+        users = users or []
+        groups = groups or []
+        if not users and not groups:
+            raise RuntimeError("At least one user or group is required to share.")
+
+        resource = self.resolve_resource(name_or_id)
+        if not resource:
+            raise RuntimeError(f"Resource not found: {name_or_id}")
+
+        resource_full = self.get_resource_with_permissions(resource["id"])
+        existing_permissions = t.cast(
+            list[PermissionRecord],
+            resource_full.get("permissions") or [],
+        )
+        existing_user_ids = {
+            str(p.get("aro_foreign_key") or "")
+            for p in existing_permissions
+            if str(p.get("aro") or "").lower() == "user"
+        }
+        existing_group_ids = {
+            str(p.get("aro_foreign_key") or "")
+            for p in existing_permissions
+            if str(p.get("aro") or "").lower() == "group"
+        }
+
+        session = self.session_info
+        current_user_id = session.get("user_id")
+
+        resolved_users: list[UserRecord] = []
+        for label in users:
+            user = self.resolve_user(label)
+            user_id = str(user.get("id") or "")
+            if not user_id:
+                raise RuntimeError(f"Resolved user has no id: {label}")
+            if user_id == current_user_id or user_id in existing_user_ids:
+                continue
+            resolved_users.append(user)
+
+        resolved_groups: list[GroupRecord] = []
+        for label in groups:
+            group = self.resolve_group(label)
+            group_id = str(group.get("id") or "")
+            if not group_id:
+                raise RuntimeError(f"Resolved group has no id: {label}")
+            if group_id in existing_group_ids:
+                continue
+            resolved_groups.append(group)
+
+        if not resolved_users and not resolved_groups:
+            return {"status": "noop", "message": "No new users or groups to share."}
+
+        secret = self.get_secret(resource["id"])
+        secret_data = secret.get("data")
+        if not secret_data:
+            raise RuntimeError("No secret data available for this resource.")
+        decrypted_secret = self.decrypt_secret(secret_data)
+
+        secrets_payload: list[dict[str, t.Any]] = []
+        seen_secret_users: set[str] = set()
+
+        def _add_secret_for_user(user: UserRecord) -> None:
+            user_id = str(user.get("id") or "")
+            if not user_id or user_id in seen_secret_users:
+                return
+            if current_user_id and user_id == current_user_id:
+                return
+            gpgkey = user.get("gpgkey") or {}
+            armored = gpgkey.get("armored_key")
+            fingerprint = gpgkey.get("fingerprint")
+            if armored:
+                _gpg_import(str(armored), self.gpg_home())
+            if not fingerprint:
+                raise RuntimeError(
+                    f"Missing gpg key fingerprint for user: {user.get('username')}",
+                )
+            encrypted_secret = self.encrypt_secret_for_fingerprint(
+                decrypted_secret,
+                str(fingerprint),
+            )
+            secrets_payload.append({"user_id": user_id, "data": encrypted_secret})
+            seen_secret_users.add(user_id)
+
+        for user in resolved_users:
+            _add_secret_for_user(user)
+
+        for group in resolved_groups:
+            group_id = str(group.get("id") or "")
+            if not group_id:
+                continue
+            full_group = self.get_group_with_users(group_id)
+            group_users = full_group.get("groups_users") or []
+            for group_user in group_users:
+                user = t.cast(UserRecord, (group_user.get("user") or {}))
+                if user:
+                    _add_secret_for_user(user)
+
+        permissions_payload: list[dict[str, t.Any]] = []
+        shared_labels: list[str] = []
+        for user in resolved_users:
+            user_id = str(user.get("id") or "")
+            if not user_id:
+                continue
+            permissions_payload.append(
+                {
+                    "aro": "User",
+                    "aro_foreign_key": user_id,
+                    "type": permission,
+                    "is_new": True,
+                },
+            )
+            shared_labels.append(self.format_user_display(user))
+        for group in resolved_groups:
+            group_id = str(group.get("id") or "")
+            if not group_id:
+                continue
+            permissions_payload.append(
+                {
+                    "aro": "Group",
+                    "aro_foreign_key": group_id,
+                    "type": permission,
+                    "is_new": True,
+                },
+            )
+            shared_labels.append(self.format_group_display(group))
+
+        if not permissions_payload:
+            return {"status": "noop", "message": "No new permissions to add."}
+
+        payload = {
+            "permissions": permissions_payload,
+            "secrets": secrets_payload,
+        }
+        data = self.api_put(f"/share/resource/{resource['id']}.json", payload=payload)
+        body = data.get("body") or {}
+        body["shared_labels"] = shared_labels
+        return body
+
+    def unshare_resource(
+        self,
+        name_or_id: str,
+        *,
+        users: list[str] | None = None,
+        groups: list[str] | None = None,
+    ) -> dict[str, t.Any]:
+        """Remove sharing permissions for users/groups; empty args removes all."""
+        users = users or []
+        groups = groups or []
+
+        resource = self.resolve_resource(name_or_id)
+        if not resource:
+            raise RuntimeError(f"Resource not found: {name_or_id}")
+
+        resource_full = self.get_resource_with_permissions(resource["id"])
+        existing_permissions = t.cast(
+            list[PermissionRecord],
+            resource_full.get("permissions") or [],
+        )
+
+        existing_user_ids = {
+            str(p.get("aro_foreign_key") or "")
+            for p in existing_permissions
+            if str(p.get("aro") or "").lower() == "user"
+        }
+        existing_group_ids = {
+            str(p.get("aro_foreign_key") or "")
+            for p in existing_permissions
+            if str(p.get("aro") or "").lower() == "group"
+        }
+
+        session = self.session_info
+        current_user_id = session.get("user_id")
+
+        target_user_ids: set[str] = set()
+        target_group_ids: set[str] = set()
+
+        display_labels: list[str] = []
+        if not users and not groups:
+            target_user_ids = {
+                user_id
+                for user_id in existing_user_ids
+                if user_id and user_id != current_user_id
+            }
+            target_group_ids = {group_id for group_id in existing_group_ids if group_id}
+        else:
+            for label in users:
+                user = self.resolve_user(label)
+                user_id = str(user.get("id") or "")
+                if not user_id or user_id == current_user_id:
+                    continue
+                if user_id in existing_user_ids:
+                    target_user_ids.add(user_id)
+                    display_labels.append(self.format_user_display(user))
+            for label in groups:
+                group = self.resolve_group(label)
+                group_id = str(group.get("id") or "")
+                if not group_id:
+                    continue
+                if group_id in existing_group_ids:
+                    target_group_ids.add(group_id)
+                    display_labels.append(self.format_group_display(group))
+
+        permission_ids: set[str] = set()
+        for perm in existing_permissions:
+            perm_id = str(perm.get("id") or "")
+            if not perm_id:
+                continue
+            aro = str(perm.get("aro") or "").lower()
+            aro_id = str(perm.get("aro_foreign_key") or "")
+            if not aro_id:
+                continue
+            if aro == "user" and aro_id in target_user_ids:
+                permission_ids.add(perm_id)
+            elif aro == "group" and aro_id in target_group_ids:
+                permission_ids.add(perm_id)
+
+        if not permission_ids:
+            return {"status": "noop", "message": "No matching shares to remove."}
+
+        permissions_payload = [
+            {"id": perm_id, "delete": True} for perm_id in sorted(permission_ids)
+        ]
+        payload = {"permissions": permissions_payload}
+        data = self.api_put(f"/share/resource/{resource['id']}.json", payload=payload)
+        body = data.get("body") or {}
+        if display_labels:
+            body["removed_labels"] = display_labels
+        return body or {"removed": sorted(permission_ids)}
+
     def get_password_field(self, name_or_id: str, field: str) -> str:
+        """Return a single field (password/user/uri) for a resource."""
         field = field.lower()
         if field not in {"password", "user", "uri"}:
             raise RuntimeError("field must be one of: password, user, uri")
@@ -878,6 +1312,7 @@ class Passbolt:
         uri: str | None = None,
         folder: str | None = None,
     ) -> str:
+        """Create or update a password entry."""
         resource = self.resolve_resource(name)
         if resource:
             return self.update_password(
@@ -902,6 +1337,7 @@ class Passbolt:
         uri: str | None = None,
         folder: str | None = None,
     ) -> str:
+        """Create a new password resource."""
         metadata_keys = self.load_metadata_keys()
         LOGGER.debug(
             f"create_password metadata_keys_count={len(metadata_keys)} "
@@ -951,7 +1387,7 @@ class Passbolt:
             metadata_keys,
         )
 
-        session = self.session_info()
+        session = self.session_info
         user_id = session.get("user_id")
         if not user_id:
             raise RuntimeError("Session missing user_id. Please re-login.")
@@ -983,6 +1419,7 @@ class Passbolt:
         username: str | None = None,
         uri: str | None = None,
     ) -> str:
+        """Update an existing password resource."""
         resource = self.resolve_resource(name_or_id)
         if not resource:
             raise RuntimeError(f"Resource not found: {name_or_id}")
@@ -1023,7 +1460,7 @@ class Passbolt:
             secret_payload = password
 
         encrypted_secret = self.encrypt_secret(secret_payload)
-        session = self.session_info()
+        session = self.session_info
         user_id = session.get("user_id")
         if not user_id:
             raise RuntimeError("Session missing user_id. Please re-login.")
@@ -1040,6 +1477,7 @@ class Passbolt:
         return str(resource["id"])
 
     def delete_password(self, name_or_id: str) -> str:
+        """Delete a password resource."""
         resource = self.resolve_resource(name_or_id)
         if not resource:
             raise RuntimeError(f"Resource not found: {name_or_id}")
@@ -1047,9 +1485,11 @@ class Passbolt:
         return str(resource["id"])
 
     def verify(self) -> PassboltApiResponse:
+        """Fetch server verification data."""
         return self.request("GET", "/auth/verify.json")
 
     def is_authenticated(self, access_token: str) -> bool:
+        """Check if an access token is authenticated."""
         data = self.request(
             "GET",
             "/auth/is-authenticated.json",
@@ -1063,6 +1503,7 @@ class Passbolt:
         refresh_token: str,
         access_token: str | None = None,
     ) -> RefreshTokens:
+        """Refresh an access token with the refresh token."""
         headers = {}
         if access_token:
             headers["Authorization"] = f"Bearer {access_token}"
@@ -1082,6 +1523,7 @@ class Passbolt:
         return refreshed
 
     def jwt_login(self, user_id: str, challenge: str) -> PassboltApiResponse:
+        """Complete JWT login using the signed challenge."""
         return self.request(
             "POST",
             "/auth/jwt/login.json",
@@ -1095,6 +1537,7 @@ class Passbolt:
         passphrase: str | None,
         verify_expiry: int,
     ) -> LoginTokens:
+        """Run the full JWT login flow using GPG challenge/response."""
         user_id = user_id.strip()
         if not user_id:
             raise RuntimeError("user_id is required for JWT login.")
