@@ -11,6 +11,7 @@ import time
 import typing as t
 import uuid
 from functools import cached_property
+from getpass import getpass
 from pathlib import Path
 
 import httpx
@@ -1357,4 +1358,62 @@ def _run_gpg_interactive(
 
 
 def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
-    return _run_gpg_interactive(["--decrypt"], message, gpg_home)
+    try:
+        # First try a silent decrypt: no pinentry, no prompt.
+        return _run_gpg_interactive(
+            ["--pinentry-mode", "error", "--decrypt"],
+            message,
+            gpg_home,
+            use_batch=True,
+        )
+    except RuntimeError as exc:
+        if _is_non_passphrase_error(str(exc)):
+            raise
+
+    passphrase = getpass("GPG passphrase: ").strip()
+    if not passphrase:
+        raise RuntimeError("GPG passphrase is required to decrypt.")
+
+    try:
+        # Try loopback pinentry in the terminal to avoid GUI popups.
+        return _run_gpg_interactive(
+            ["--decrypt"],
+            message,
+            gpg_home,
+            passphrase=passphrase,
+            use_batch=True,
+        )
+    except RuntimeError as exc:
+        if _is_loopback_blocked(str(exc)):
+            # Fall back to interactive pinentry if loopback is disallowed.
+            return _run_gpg_interactive(["--decrypt"], message, gpg_home)
+        raise
+
+
+def _is_non_passphrase_error(error: str) -> bool:
+    error = error.lower()
+    return any(
+        marker in error
+        for marker in (
+            "no secret key",
+            "no public key",
+            "no data",
+            "invalid packet",
+            "not a valid openpgp",
+            "decrypt_message failed",
+        )
+    )
+
+
+def _is_loopback_blocked(error: str) -> bool:
+    error = error.lower()
+    return any(
+        marker in error
+        for marker in (
+            "pinentry",
+            "loopback",
+            "inappropriate ioctl",
+            "no tty",
+            "cannot get input",
+        )
+    )
