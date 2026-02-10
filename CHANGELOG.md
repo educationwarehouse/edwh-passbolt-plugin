@@ -1,3 +1,17 @@
 # Changelog
 
 <!--next-version-placeholder-->
+
+## v0.1.0 (2026-02-10)
+
+### Feature
+
+* Support sharing/unsharing passwords ([`a879c81`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/a879c817eb0ba1bb29702a17e6534f860fab31e1))
+* Improved typing and docs ([`37d8a9c`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/37d8a9cbe64a2a9cb7e580b691af997798102124))
+* `search` subcommand, disabled untested 'rotate' ([`2211cdb`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/2211cdbdb65c6d260c664aa854796f5a8c6d720c))
+* List, add, set ([`852535f`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/852535ff125df52f41825138a5d8d21b54d2bcc6))
+* Implemented authentication ([`6bc5573`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/6bc5573e4f904a6b6e5dec443533a14a0d9ed955))
+
+### Fix
+
+* **passphrase:** Use cli prompt instead of OS popup ([`201cd62`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/201cd62925bac7986ee59be9f6b852a1c0dc112e))
