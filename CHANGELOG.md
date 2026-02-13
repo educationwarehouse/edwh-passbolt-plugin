@@ -2,6 +2,12 @@
 
 <!--next-version-placeholder-->
 
+## v0.1.1 (2026-02-13)
+
+### Fix
+
+* Lower search threshold so 'docker' finds 'docker hub' ([`8c73286`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/8c73286232da963e6da2e8e1f148c0a4656712fa))
+
 ## v0.1.0 (2026-02-10)
 
 ### Feature
