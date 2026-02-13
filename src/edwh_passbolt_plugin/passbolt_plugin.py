@@ -235,7 +235,7 @@ def get_password(_: Context, name: str, field: str = "password") -> None:
     name="search",
 )
 def search_passwords(
-    _: Context, term: str, limit: int = 10, threshold: int = 70
+    _: Context, term: str, limit: int = 10, threshold: int = 60
 ) -> None:
     """Fuzzy search passwords and show matching entries (including passwords)."""
     client = Passbolt.from_session()
