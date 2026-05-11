@@ -40,12 +40,11 @@ from .types import (
 )
 
 class PassboltError(Exception):
-    def __init__(self, message, error_code):
+    def __init__(self, message):
         self.message = message
-        self.error_code = error_code
         super().__init__(self.message)
     def __str__(self):
-        return f"{self.message}(Error code: {self.error_code})"
+        return f"{self.message}"
 class GPGError(PassboltError): ...
 
 def _configure_logging() -> logging.Logger:
@@ -1795,7 +1794,7 @@ def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
 
     passphrase = getpass("Passbolt/GPG passphrase: ").strip()
     if not passphrase:
-        raise RuntimeError("GPG passphrase is required to decrypt.")
+        raise GPGError("GPG passphrase is required to decrypt.")
 
     try:
         # Try loopback pinentry in the terminal to avoid GUI popups.
@@ -1810,7 +1809,7 @@ def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
         if _is_loopback_blocked(str(exc)):
             # Fall back to interactive pinentry if loopback is disallowed.
             return _run_gpg_interactive(["--decrypt"], message, gpg_home)
-        raise
+        raise GPGError("Wrong GPG passphrase.")
 
 
 def _is_non_passphrase_error(error: str) -> bool:
