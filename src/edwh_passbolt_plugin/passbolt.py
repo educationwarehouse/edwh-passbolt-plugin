@@ -10,6 +10,7 @@ import tempfile
 import time
 import typing as t
 import uuid
+import pyotp
 from functools import cached_property
 from getpass import getpass
 from pathlib import Path
@@ -38,6 +39,14 @@ from .types import (
     UserRecord,
 )
 
+class PassboltError(Exception):
+    def __init__(self, message, error_code):
+        self.message = message
+        self.error_code = error_code
+        super().__init__(self.message)
+    def __str__(self):
+        return f"{self.message}(Error code: {self.error_code})"
+class GPGError(PassboltError): ...
 
 def _configure_logging() -> logging.Logger:
     logger = logging.getLogger("edwh.passbolt")
@@ -886,7 +895,7 @@ class Passbolt:
             password: str | None = None
             if include_passwords and resource_id:
                 try:
-                    password = self.get_password_field(resource_id, "password")
+                    password = self.get_password_field(resource_id)
                 except RuntimeError as exc:
                     password = f"Error: {exc}"
 
@@ -1245,41 +1254,38 @@ class Passbolt:
             body["removed_labels"] = display_labels
         return body or {"removed": sorted(permission_ids)}
 
-    def get_password_field(self, name_or_id: str, field: str) -> str:
+    def get_password_field(self, name_or_id: str) -> str:
         """Return a single field (password/user/uri) for a resource."""
-        field = field.lower()
-        if field not in {"password", "user", "uri"}:
-            raise RuntimeError("field must be one of: password, user, uri")
-
         resource = self.resolve_resource(name_or_id)
         if not resource:
             raise RuntimeError(f"Resource not found: {name_or_id}")
 
-        metadata_keys = self.load_metadata_keys()
-        metadata = {}
-        if resource.get("metadata") and resource.get("metadata_key_id"):
-            metadata = self.decrypt_metadata(
-                resource["metadata"],
-                resource["metadata_key_id"],
-                resource.get("metadata_key_type"),
-                metadata_keys,
-            )
-
-        if field == "user":
-            return str(metadata.get("username") or "")
-        if field == "uri":
-            uri_value = metadata.get("uri")
-            if not uri_value and isinstance(metadata.get("uris"), list):
-                uri_value = metadata.get("uris")[0] if metadata.get("uris") else ""
-            return str(uri_value or "")
-
+        # metadata_keys = self.load_metadata_keys()
+        # metadata = {}
+        # if resource.get("metadata") and resource.get("metadata_key_id"):
+        #     metadata = self.decrypt_metadata(
+        #         resource["metadata"],
+        #         resource["metadata_key_id"],
+        #         resource.get("metadata_key_type"),
+        #         metadata_keys,
+        #     )
+        #TODO TOTP HIER TOEVOEGEN
         secret = self.get_secret(resource["id"])
+        totp = pyotp.TOTP(secret)
+        # print(totp)
+        # print(totp.verify(totp.now()))
         secret_data = secret.get("data")
         if not secret_data:
             raise RuntimeError("No secret data available for this resource.")
         decrypted = self.decrypt_secret(secret_data)
+        # print(decrypted, type(decrypted))
+        # print(decrypted)
         if isinstance(decrypted, dict) and "password" in decrypted:
             return str(decrypted.get("password") or "")
+        if isinstance(decrypted, dict) and "totp" in decrypted:
+            totp = pyotp.TOTP(str(decrypted.get("totp", {}).get("secret_key", "")))
+            print(totp.now(), totp.verify(totp.now()))
+            decrypted.get("totp")["totp_code"] = totp.now()
         return str(decrypted)
 
     def set_password(

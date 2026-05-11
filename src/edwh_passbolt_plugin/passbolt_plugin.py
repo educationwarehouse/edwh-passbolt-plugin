@@ -11,7 +11,7 @@ from rich import print as rprint
 from rich.table import Table
 from threadful import animate, thread
 
-from .passbolt import Passbolt
+from .passbolt import Passbolt, PassboltError
 
 T = t.TypeVar("T")
 
@@ -55,8 +55,11 @@ def with_spinner(func: t.Callable[[], T], text: str) -> T:
 
 @task()
 def ensure_logged_in(_: Context) -> None:
-    Passbolt.validate_session()
-
+    try:
+        Passbolt.validate_session()
+    except PassboltError as exc:
+        print(exc)
+        exit(1)
 
 def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
     host = _prompt(f"Passbolt host (e.g. {DEFAULT_HOST})") or DEFAULT_HOST
@@ -215,11 +218,11 @@ def list_folders(_: Context) -> None:
     aliases=("get-password",),
     pre=[ensure_logged_in],
 )
-def get_password(_: Context, name: str, field: str = "password") -> None:
+def get_password(_: Context, name: str) -> None:
     """Retrieve a password (or specific field) for an entry."""
     client = Passbolt.from_session()
     value = with_spinner(
-        lambda: client.get_password_field(name, field),
+        lambda: client.get_password_field(name),
         text="Fetching password...",
     )
     print(value)
