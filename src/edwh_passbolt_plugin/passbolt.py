@@ -715,6 +715,17 @@ class Passbolt:
             )
         return resources
 
+    @cache
+    def get_all_decrypted_folders(self, name_or_id) -> FolderRecord | None:
+        folders = self.list_folders()
+        metadata_keys = self.load_metadata_keys()
+        for folder in folders:
+            if folder.get("id") == name_or_id or folder.get("name") == name_or_id:
+                return folder
+            folder["decrypted_metadata"] = self._try_decrypt_metadata(folders, metadata_keys)
+            return folder
+        return None
+
     def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
         """Resolve a resource by id or decrypted name."""
         resources = self.get_all_decrypted_resources()
@@ -729,20 +740,6 @@ class Passbolt:
             meta = resource.get("decrypted_metadata")
             if meta and meta.get("name") == name_or_id:
                 return resource
-        return None
-
-    def resolve_folder(self, name_or_id: str) -> FolderRecord | None:
-        """Resolve a folder by id or decrypted name."""
-        folders = self.list_folders()
-        metadata_keys = self.load_metadata_keys()
-        for folder in folders:
-            if folder.get("id") == name_or_id:
-                return folder
-            if folder.get("name") == name_or_id:
-                return folder
-            meta = self._try_decrypt_metadata(folder, metadata_keys)
-            if meta and meta.get("name") == name_or_id:
-                return folder
         return None
 
     def list_folder_entries(self) -> list[FolderEntry]:
@@ -1350,7 +1347,7 @@ class Passbolt:
 
         preferred_folder_parent_id: str | None = None
         if folder:
-            resolved_folder = self.resolve_folder(folder)
+            resolved_folder = self.get_all_decrypted_folders(folder)
             if not resolved_folder or not resolved_folder.get("id"):
                 raise RuntimeError(f"Folder not found: {folder}")
             preferred_folder_parent_id = resolved_folder.get("id")

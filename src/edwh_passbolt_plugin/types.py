@@ -76,6 +76,7 @@ class FolderRecord(t.TypedDict, total=False):
     modified: str
     created_by: str
     modified_by: str
+    decrypted_metadata: dict[str, t.Any] | None
 
 
 class SecretRecord(t.TypedDict, total=False):
