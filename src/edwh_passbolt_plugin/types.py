@@ -38,7 +38,7 @@ class ResourceRecord(t.TypedDict, total=False):
     folder_parent_id: str | None
     personal: bool
     permissions: list["PermissionRecord"]
-
+    decrypted_metadata: dict[str, t.Any] | None
 
 class PermissionRecord(t.TypedDict, total=False):
     id: str

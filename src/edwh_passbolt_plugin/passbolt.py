@@ -11,7 +11,7 @@ import time
 import typing as t
 import uuid
 import pyotp
-from functools import cached_property
+from functools import cached_property, cache
 from getpass import getpass
 from pathlib import Path
 
@@ -444,7 +444,7 @@ class Passbolt:
     def gpg_home(self) -> str:
         """Return the GNUPGHOME directory used for GPG operations."""
         return self._gpg_home or _default_gpg_home()
-
+    @cache
     def load_metadata_keys(self) -> dict[str, MetadataKeyRecord]:
         """Load available metadata keys for encrypting/decrypting metadata."""
         params = {
@@ -618,7 +618,7 @@ class Passbolt:
         else:
             raw = str(secret_value)
         return _gpg_encrypt(raw, user_fingerprint, self.gpg_home())
-
+    @cache
     def list_resources(
         self, *, include_permissions: bool = False
     ) -> list[ResourceRecord]:
@@ -695,10 +695,17 @@ class Passbolt:
             return next(iter(resource_types.values()))
         raise RuntimeError("No resource types available.")
 
+    @cache
+    def get_all_decrypted_resources(self, include_permissions: bool = False) -> list[ResourceRecord]:
+        resources : list[ResourceRecord] = self.list_resources(include_permissions = include_permissions)
+        metadata_keys = self.load_metadata_keys()
+        for resource in resources:
+            resource["decrypted_metadata"] = self._try_decrypt_metadata(resource, metadata_keys)
+        return resources
+
     def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
         """Resolve a resource by id or decrypted name."""
-        resources = self.list_resources()
-        metadata_keys = self.load_metadata_keys()
+        resources = self.get_all_decrypted_resources()
         for resource in resources:
             LOGGER.debug(
                 "Resolving resource "
@@ -707,7 +714,7 @@ class Passbolt:
             )
             if resource.get("id") == name_or_id:
                 return resource
-            meta = self._try_decrypt_metadata(resource, metadata_keys)
+            meta = resource.get("decrypted_metadata")
             if meta and meta.get("name") == name_or_id:
                 return resource
         return None
@@ -795,8 +802,7 @@ class Passbolt:
         include_shares: bool = False,
     ) -> list[PasswordEntry]:
         """List decrypted password metadata and optional share counts."""
-        resources = self.list_resources(include_permissions=include_shares)
-        metadata_keys = self.load_metadata_keys()
+        resources = self.get_all_decrypted_resources(include_permissions=include_shares)
         folders: dict[str, str | None] = {}
         if include_folder:
             folders = {
@@ -806,7 +812,7 @@ class Passbolt:
         current_user_id = session.get("user_id")
         entries: list[PasswordEntry] = []
         for resource in resources:
-            meta = self._try_decrypt_metadata(resource, metadata_keys)
+            meta = resource.get("decrypted_metadata")
             if not meta:
                 LOGGER.warning(
                     f"Failed to decrypt metadata for id={resource.get('id')}",
@@ -834,7 +840,6 @@ class Passbolt:
                         group_ids.add(aro_id)
                 shared_users = len(user_ids)
                 shared_groups = len(group_ids)
-
             entries.append(
                 {
                     "id": resource["id"],
@@ -1259,32 +1264,15 @@ class Passbolt:
         resource = self.resolve_resource(name_or_id)
         if not resource:
             raise RuntimeError(f"Resource not found: {name_or_id}")
-
-        # metadata_keys = self.load_metadata_keys()
-        # metadata = {}
-        # if resource.get("metadata") and resource.get("metadata_key_id"):
-        #     metadata = self.decrypt_metadata(
-        #         resource["metadata"],
-        #         resource["metadata_key_id"],
-        #         resource.get("metadata_key_type"),
-        #         metadata_keys,
-        #     )
-        #TODO TOTP HIER TOEVOEGEN
         secret = self.get_secret(resource["id"])
-        totp = pyotp.TOTP(secret)
-        # print(totp)
-        # print(totp.verify(totp.now()))
         secret_data = secret.get("data")
         if not secret_data:
             raise RuntimeError("No secret data available for this resource.")
         decrypted = self.decrypt_secret(secret_data)
-        # print(decrypted, type(decrypted))
-        # print(decrypted)
         if isinstance(decrypted, dict) and "password" in decrypted:
             return str(decrypted.get("password") or "")
         if isinstance(decrypted, dict) and "totp" in decrypted:
             totp = pyotp.TOTP(str(decrypted.get("totp", {}).get("secret_key", "")))
-            print(totp.now(), totp.verify(totp.now()))
             decrypted.get("totp")["totp_code"] = totp.now()
         return str(decrypted)
 
