@@ -1765,9 +1765,19 @@ def _run_gpg_interactive(
             env=_gpg_env(gpg_home),
             check=False,
         )
+    stderr = proc.stderr.decode("utf-8").strip()
+    stdout = proc.stdout.decode("utf-8").strip()
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.decode("utf-8").strip())
-    return proc.stdout.decode("utf-8").strip()
+        # GPG can return non-zero for mixed signature verification results
+        # (e.g. one unknown signer and one valid signer) while still yielding
+        # valid decrypted payload on stdout.
+        if stdout and "--decrypt" in args and _is_missing_public_key_warning(stderr):
+            LOGGER.debug(
+                "GPG decrypt: missing signer public key; using decrypted payload.",
+            )
+            return stdout
+        raise RuntimeError(stderr)
+    return stdout
 
 
 def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
@@ -1830,3 +1840,8 @@ def _is_loopback_blocked(error: str) -> bool:
             "cannot get input",
         )
     )
+
+
+def _is_missing_public_key_warning(error: str) -> bool:
+    error = error.lower()
+    return "can't check signature: no public key" in error or "no public key" in error
