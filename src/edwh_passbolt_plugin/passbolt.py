@@ -10,12 +10,12 @@ import tempfile
 import time
 import typing as t
 import uuid
-import pyotp
-from functools import cached_property, cache
+from functools import cache, cached_property
 from getpass import getpass
 from pathlib import Path
 
 import httpx
+import pyotp
 from rapidfuzz import fuzz, process
 
 from .types import (
@@ -39,13 +39,18 @@ from .types import (
     UserRecord,
 )
 
+
 class PassboltError(Exception):
     def __init__(self, message):
         self.message = message
         super().__init__(self.message)
+
     def __str__(self):
         return f"{self.message}"
+
+
 class GPGError(PassboltError): ...
+
 
 def _configure_logging() -> logging.Logger:
     logger = logging.getLogger("edwh.passbolt")
@@ -443,6 +448,7 @@ class Passbolt:
     def gpg_home(self) -> str:
         """Return the GNUPGHOME directory used for GPG operations."""
         return self._gpg_home or _default_gpg_home()
+
     @cache
     def load_metadata_keys(self) -> dict[str, MetadataKeyRecord]:
         """Load available metadata keys for encrypting/decrypting metadata."""
@@ -617,6 +623,7 @@ class Passbolt:
         else:
             raw = str(secret_value)
         return _gpg_encrypt(raw, user_fingerprint, self.gpg_home())
+
     @cache
     def list_resources(
         self, *, include_permissions: bool = False
@@ -695,11 +702,17 @@ class Passbolt:
         raise RuntimeError("No resource types available.")
 
     @cache
-    def get_all_decrypted_resources(self, include_permissions: bool = False) -> list[ResourceRecord]:
-        resources : list[ResourceRecord] = self.list_resources(include_permissions = include_permissions)
+    def get_all_decrypted_resources(
+        self, include_permissions: bool = False
+    ) -> list[ResourceRecord]:
+        resources: list[ResourceRecord] = self.list_resources(
+            include_permissions=include_permissions
+        )
         metadata_keys = self.load_metadata_keys()
         for resource in resources:
-            resource["decrypted_metadata"] = self._try_decrypt_metadata(resource, metadata_keys)
+            resource["decrypted_metadata"] = self._try_decrypt_metadata(
+                resource, metadata_keys
+            )
         return resources
 
     def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
@@ -744,8 +757,7 @@ class Passbolt:
             meta = self._try_decrypt_metadata(folder, metadata_keys)
             if not meta:
                 LOGGER.warning(
-                    "Failed to decrypt folder metadata for "
-                    f"id={folder.get('id')}",
+                    f"Failed to decrypt folder metadata for id={folder.get('id')}",
                 )
                 continue
             entries.append({"id": folder["id"], "name": meta.get("name")})

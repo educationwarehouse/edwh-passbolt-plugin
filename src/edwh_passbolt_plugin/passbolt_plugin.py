@@ -61,6 +61,7 @@ def ensure_logged_in(_: Context) -> None:
         print(exc)
         exit(1)
 
+
 def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
     host = _prompt(f"Passbolt host (e.g. {DEFAULT_HOST})") or DEFAULT_HOST
     host = _normalize_base_url(host)
@@ -78,9 +79,7 @@ def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
         import_key = _prompt("Path to private key (recovery kit)")
     elif import_mode == "paste":
         import_key = _read_key_block()
-    passphrase = (
-        getpass("Passbolt/GPG passphrase: ").strip() or None
-    )
+    passphrase = getpass("Passbolt/GPG passphrase: ").strip() or None
     return host, user_id, import_key, passphrase
 
 
@@ -119,9 +118,7 @@ def login(
     if not any([host, user_id, import_key, passphrase]):
         host, user_id, import_key, passphrase = _prompt_login_inputs()
     if passphrase is None:
-        passphrase = (
-            getpass("Passbolt/GPG passphrase: ").strip() or None
-        )
+        passphrase = getpass("Passbolt/GPG passphrase: ").strip() or None
 
     if not host or not user_id:
         raise RuntimeError("Host and user_id are required.")
