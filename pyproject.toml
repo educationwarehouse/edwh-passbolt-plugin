@@ -30,6 +30,7 @@ dependencies = [
     "rapidfuzz",
     "rich",
     "threadful",
+    "pyotp",
 ]
 
 [project.optional-dependencies]
