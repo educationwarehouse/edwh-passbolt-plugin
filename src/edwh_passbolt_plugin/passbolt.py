@@ -10,11 +10,12 @@ import tempfile
 import time
 import typing as t
 import uuid
-from functools import cached_property
+from functools import cache, cached_property
 from getpass import getpass
 from pathlib import Path
 
 import httpx
+import pyotp
 from rapidfuzz import fuzz, process
 
 from .types import (
@@ -37,6 +38,18 @@ from .types import (
     Tokens,
     UserRecord,
 )
+
+
+class PassboltError(Exception):
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
+
+    def __str__(self):
+        return f"{self.message}"
+
+
+class GPGError(PassboltError): ...
 
 
 def _configure_logging() -> logging.Logger:
@@ -436,6 +449,7 @@ class Passbolt:
         """Return the GNUPGHOME directory used for GPG operations."""
         return self._gpg_home or _default_gpg_home()
 
+    @cache
     def load_metadata_keys(self) -> dict[str, MetadataKeyRecord]:
         """Load available metadata keys for encrypting/decrypting metadata."""
         params = {
@@ -610,6 +624,7 @@ class Passbolt:
             raw = str(secret_value)
         return _gpg_encrypt(raw, user_fingerprint, self.gpg_home())
 
+    @cache
     def list_resources(
         self, *, include_permissions: bool = False
     ) -> list[ResourceRecord]:
@@ -686,10 +701,32 @@ class Passbolt:
             return next(iter(resource_types.values()))
         raise RuntimeError("No resource types available.")
 
+    @cache
+    def get_all_decrypted_resources(
+        self, include_permissions: bool = False
+    ) -> list[ResourceRecord]:
+        resources: list[ResourceRecord] = self.list_resources(
+            include_permissions=include_permissions
+        )
+        metadata_keys = self.load_metadata_keys()
+        for resource in resources:
+            resource["decrypted_metadata"] = self._try_decrypt_metadata(
+                resource, metadata_keys
+            )
+        return resources
+
+    @cache
+    def get_all_decrypted_folders(self) -> FolderRecord | None:
+        folders = self.list_folders()
+        metadata_keys = self.load_metadata_keys()
+        for folder in folders:
+            folder["decrypted_metadata"] = self._try_decrypt_metadata(folders, metadata_keys)
+            return folder
+        return None
+
     def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
         """Resolve a resource by id or decrypted name."""
-        resources = self.list_resources()
-        metadata_keys = self.load_metadata_keys()
+        resources = self.get_all_decrypted_resources()
         for resource in resources:
             LOGGER.debug(
                 "Resolving resource "
@@ -698,23 +735,9 @@ class Passbolt:
             )
             if resource.get("id") == name_or_id:
                 return resource
-            meta = self._try_decrypt_metadata(resource, metadata_keys)
+            meta = resource.get("decrypted_metadata")
             if meta and meta.get("name") == name_or_id:
                 return resource
-        return None
-
-    def resolve_folder(self, name_or_id: str) -> FolderRecord | None:
-        """Resolve a folder by id or decrypted name."""
-        folders = self.list_folders()
-        metadata_keys = self.load_metadata_keys()
-        for folder in folders:
-            if folder.get("id") == name_or_id:
-                return folder
-            if folder.get("name") == name_or_id:
-                return folder
-            meta = self._try_decrypt_metadata(folder, metadata_keys)
-            if meta and meta.get("name") == name_or_id:
-                return folder
         return None
 
     def list_folder_entries(self) -> list[FolderEntry]:
@@ -729,8 +752,7 @@ class Passbolt:
             meta = self._try_decrypt_metadata(folder, metadata_keys)
             if not meta:
                 LOGGER.warning(
-                    "Failed to decrypt folder metadata for "
-                    f"id={folder.get('id')}",
+                    f"Failed to decrypt folder metadata for id={folder.get('id')}",
                 )
                 continue
             entries.append({"id": folder["id"], "name": meta.get("name")})
@@ -786,8 +808,7 @@ class Passbolt:
         include_shares: bool = False,
     ) -> list[PasswordEntry]:
         """List decrypted password metadata and optional share counts."""
-        resources = self.list_resources(include_permissions=include_shares)
-        metadata_keys = self.load_metadata_keys()
+        resources = self.get_all_decrypted_resources(include_permissions=include_shares)
         folders: dict[str, str | None] = {}
         if include_folder:
             folders = {
@@ -797,7 +818,7 @@ class Passbolt:
         current_user_id = session.get("user_id")
         entries: list[PasswordEntry] = []
         for resource in resources:
-            meta = self._try_decrypt_metadata(resource, metadata_keys)
+            meta = resource.get("decrypted_metadata")
             if not meta:
                 LOGGER.warning(
                     f"Failed to decrypt metadata for id={resource.get('id')}",
@@ -825,7 +846,6 @@ class Passbolt:
                         group_ids.add(aro_id)
                 shared_users = len(user_ids)
                 shared_groups = len(group_ids)
-
             entries.append(
                 {
                     "id": resource["id"],
@@ -886,7 +906,7 @@ class Passbolt:
             password: str | None = None
             if include_passwords and resource_id:
                 try:
-                    password = self.get_password_field(resource_id, "password")
+                    password = self.get_password_field(resource_id)
                 except RuntimeError as exc:
                     password = f"Error: {exc}"
 
@@ -1245,34 +1265,11 @@ class Passbolt:
             body["removed_labels"] = display_labels
         return body or {"removed": sorted(permission_ids)}
 
-    def get_password_field(self, name_or_id: str, field: str) -> str:
+    def get_password_field(self, name_or_id: str) -> str:
         """Return a single field (password/user/uri) for a resource."""
-        field = field.lower()
-        if field not in {"password", "user", "uri"}:
-            raise RuntimeError("field must be one of: password, user, uri")
-
         resource = self.resolve_resource(name_or_id)
         if not resource:
             raise RuntimeError(f"Resource not found: {name_or_id}")
-
-        metadata_keys = self.load_metadata_keys()
-        metadata = {}
-        if resource.get("metadata") and resource.get("metadata_key_id"):
-            metadata = self.decrypt_metadata(
-                resource["metadata"],
-                resource["metadata_key_id"],
-                resource.get("metadata_key_type"),
-                metadata_keys,
-            )
-
-        if field == "user":
-            return str(metadata.get("username") or "")
-        if field == "uri":
-            uri_value = metadata.get("uri")
-            if not uri_value and isinstance(metadata.get("uris"), list):
-                uri_value = metadata.get("uris")[0] if metadata.get("uris") else ""
-            return str(uri_value or "")
-
         secret = self.get_secret(resource["id"])
         secret_data = secret.get("data")
         if not secret_data:
@@ -1280,6 +1277,9 @@ class Passbolt:
         decrypted = self.decrypt_secret(secret_data)
         if isinstance(decrypted, dict) and "password" in decrypted:
             return str(decrypted.get("password") or "")
+        if isinstance(decrypted, dict) and "totp" in decrypted:
+            totp = pyotp.TOTP(str(decrypted.get("totp", {}).get("secret_key", "")))
+            decrypted.get("totp")["totp_code"] = totp.now()
         return str(decrypted)
 
     def set_password(
@@ -1345,7 +1345,7 @@ class Passbolt:
 
         preferred_folder_parent_id: str | None = None
         if folder:
-            resolved_folder = self.resolve_folder(folder)
+            resolved_folder = self.get_all_decrypted_folders(folder)
             if not resolved_folder or not resolved_folder.get("id"):
                 raise RuntimeError(f"Folder not found: {folder}")
             preferred_folder_parent_id = resolved_folder.get("id")
@@ -1771,9 +1771,19 @@ def _run_gpg_interactive(
             env=_gpg_env(gpg_home),
             check=False,
         )
+    stderr = proc.stderr.decode("utf-8").strip()
+    stdout = proc.stdout.decode("utf-8").strip()
     if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.decode("utf-8").strip())
-    return proc.stdout.decode("utf-8").strip()
+        # GPG can return non-zero for mixed signature verification results
+        # (e.g. one unknown signer and one valid signer) while still yielding
+        # valid decrypted payload on stdout.
+        if stdout and "--decrypt" in args and _is_missing_public_key_warning(stderr):
+            LOGGER.debug(
+                "GPG decrypt: missing signer public key; using decrypted payload.",
+            )
+            return stdout
+        raise RuntimeError(stderr)
+    return stdout
 
 
 def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
@@ -1791,7 +1801,7 @@ def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
 
     passphrase = getpass("Passbolt/GPG passphrase: ").strip()
     if not passphrase:
-        raise RuntimeError("GPG passphrase is required to decrypt.")
+        raise GPGError("GPG passphrase is required to decrypt.")
 
     try:
         # Try loopback pinentry in the terminal to avoid GUI popups.
@@ -1806,7 +1816,7 @@ def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
         if _is_loopback_blocked(str(exc)):
             # Fall back to interactive pinentry if loopback is disallowed.
             return _run_gpg_interactive(["--decrypt"], message, gpg_home)
-        raise
+        raise GPGError("Wrong GPG passphrase.")
 
 
 def _is_non_passphrase_error(error: str) -> bool:
@@ -1836,3 +1846,8 @@ def _is_loopback_blocked(error: str) -> bool:
             "cannot get input",
         )
     )
+
+
+def _is_missing_public_key_warning(error: str) -> bool:
+    error = error.lower()
+    return "can't check signature: no public key" in error or "no public key" in error

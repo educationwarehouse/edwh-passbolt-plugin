@@ -9,9 +9,10 @@ from edwh import task
 from invoke import Context
 from rich import print as rprint
 from rich.table import Table
+from termcolor import cprint
 from threadful import animate, thread
 
-from .passbolt import Passbolt
+from .passbolt import Passbolt, PassboltError
 
 T = t.TypeVar("T")
 
@@ -55,7 +56,11 @@ def with_spinner(func: t.Callable[[], T], text: str) -> T:
 
 @task()
 def ensure_logged_in(_: Context) -> None:
-    Passbolt.validate_session()
+    try:
+        Passbolt.validate_session()
+    except PassboltError as exc:
+        cprint(exc, "red")
+        exit(1)
 
 
 def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
@@ -75,9 +80,7 @@ def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
         import_key = _prompt("Path to private key (recovery kit)")
     elif import_mode == "paste":
         import_key = _read_key_block()
-    passphrase = (
-        getpass("Passbolt/GPG passphrase: ").strip() or None
-    )
+    passphrase = getpass("Passbolt/GPG passphrase: ").strip() or None
     return host, user_id, import_key, passphrase
 
 
@@ -116,9 +119,7 @@ def login(
     if not any([host, user_id, import_key, passphrase]):
         host, user_id, import_key, passphrase = _prompt_login_inputs()
     if passphrase is None:
-        passphrase = (
-            getpass("Passbolt/GPG passphrase: ").strip() or None
-        )
+        passphrase = getpass("Passbolt/GPG passphrase: ").strip() or None
 
     if not host or not user_id:
         raise RuntimeError("Host and user_id are required.")
@@ -215,11 +216,11 @@ def list_folders(_: Context) -> None:
     aliases=("get-password",),
     pre=[ensure_logged_in],
 )
-def get_password(_: Context, name: str, field: str = "password") -> None:
+def get_password(_: Context, name: str) -> None:
     """Retrieve a password (or specific field) for an entry."""
     client = Passbolt.from_session()
     value = with_spinner(
-        lambda: client.get_password_field(name, field),
+        lambda: client.get_password_field(name),
         text="Fetching password...",
     )
     print(value)
