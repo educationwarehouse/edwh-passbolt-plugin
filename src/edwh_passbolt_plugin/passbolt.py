@@ -14,7 +14,7 @@ from functools import cache, cached_property
 from getpass import getpass
 from pathlib import Path
 
-import httpx
+import requests
 import pyotp
 from rapidfuzz import fuzz, process
 
@@ -187,11 +187,10 @@ class Passbolt:
     def __init__(
         self,
         base_url: str,
-        timeout: float = 30.0,
         gpg_home: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=timeout)
+        self._client = requests.Client()
         self._gpg_home = gpg_home
         self._session_tokens: Tokens | None = None
         self._session_info: SessionData | None = None
@@ -356,12 +355,13 @@ class Passbolt:
             LOGGER.debug(
                 f"[request] method={method} url={url} payload={payload} headers={request_headers}",
             )
-
+            timeout: float = 30.0
             resp = self._client.request(
                 method,
                 url,
                 json=payload,
                 headers=request_headers,
+                timeout=timeout
             )
 
             resp.raise_for_status()
@@ -369,11 +369,11 @@ class Passbolt:
             LOGGER.debug(f"[response] status={resp.status_code} data={data}")
             return data
 
-        except httpx.HTTPStatusError as exc:
+        except requests.HTTPStatusError as exc:
             raise RuntimeError(
                 f"HTTP {exc.response.status_code} from {url}: {exc.response.text}",
             ) from exc
-        except httpx.RequestError as exc:
+        except requests.RequestError as exc:
             raise RuntimeError(f"Network error calling {url}: {exc}") from exc
 
     @property
