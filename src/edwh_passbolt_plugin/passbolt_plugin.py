@@ -9,6 +9,7 @@ from edwh import task
 from invoke import Context
 from rich import print as rprint
 from rich.table import Table
+from termcolor import cprint
 from threadful import animate, thread
 
 from .passbolt import Passbolt, PassboltError
@@ -58,7 +59,7 @@ def ensure_logged_in(_: Context) -> None:
     try:
         Passbolt.validate_session()
     except PassboltError as exc:
-        print(exc)
+        cprint(exc, "red")
         exit(1)
 
 

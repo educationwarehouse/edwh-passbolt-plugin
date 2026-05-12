@@ -716,12 +716,10 @@ class Passbolt:
         return resources
 
     @cache
-    def get_all_decrypted_folders(self, name_or_id) -> FolderRecord | None:
+    def get_all_decrypted_folders(self) -> FolderRecord | None:
         folders = self.list_folders()
         metadata_keys = self.load_metadata_keys()
         for folder in folders:
-            if folder.get("id") == name_or_id or folder.get("name") == name_or_id:
-                return folder
             folder["decrypted_metadata"] = self._try_decrypt_metadata(folders, metadata_keys)
             return folder
         return None
