@@ -2,6 +2,12 @@
 
 <!--next-version-placeholder-->
 
+## v0.2.0 (2026-05-12)
+
+### Feature
+
+* **totp:** Added totp support to passbolt.search ([#1](https://github.com/educationwarehouse/edwh-passbolt-plugin/issues/1)) ([`74bdd76`](https://github.com/educationwarehouse/edwh-passbolt-plugin/commit/74bdd76af4285fc99eb6071f4eda99ae18bbef94))
+
 ## v0.1.1 (2026-02-13)
 
 ### Fix
