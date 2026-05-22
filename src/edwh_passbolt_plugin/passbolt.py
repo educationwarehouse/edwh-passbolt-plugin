@@ -14,8 +14,8 @@ from functools import cache, cached_property
 from getpass import getpass
 from pathlib import Path
 
-import requests
 import pyotp
+import requests
 from rapidfuzz import fuzz, process
 
 from .types import (
@@ -189,6 +189,7 @@ class Passbolt:
         base_url: str,
         gpg_home: str | None = None,
     ) -> None:
+        self.timeout = 30.0
         self.base_url = base_url.rstrip("/")
         self._client = requests.Client()
         self._gpg_home = gpg_home
@@ -355,13 +356,8 @@ class Passbolt:
             LOGGER.debug(
                 f"[request] method={method} url={url} payload={payload} headers={request_headers}",
             )
-            timeout: float = 30.0
             resp = self._client.request(
-                method,
-                url,
-                json=payload,
-                headers=request_headers,
-                timeout=timeout
+                method, url, json=payload, headers=request_headers, timeout=self.timeout
             )
 
             resp.raise_for_status()
@@ -720,7 +716,9 @@ class Passbolt:
         folders = self.list_folders()
         metadata_keys = self.load_metadata_keys()
         for folder in folders:
-            folder["decrypted_metadata"] = self._try_decrypt_metadata(folders, metadata_keys)
+            folder["decrypted_metadata"] = self._try_decrypt_metadata(
+                folders, metadata_keys
+            )
             return folder
         return None
 
