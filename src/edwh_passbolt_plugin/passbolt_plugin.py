@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 import typing as t
 from getpass import getpass
 from pathlib import Path
@@ -60,7 +61,7 @@ def ensure_logged_in(_: Context) -> None:
         Passbolt.validate_session()
     except PassboltError as exc:
         cprint(exc, "red")
-        exit(1)
+        sys.exit(1)
 
 
 def _prompt_login_inputs() -> tuple[str, str, str | None, str | None]:
@@ -123,6 +124,8 @@ def login(
 
     if not host or not user_id:
         raise RuntimeError("Host and user_id are required.")
+    if not import_key:
+        raise RuntimeError("import_key is required for login.")
 
     host = _normalize_base_url(host)
     Passbolt.from_login(
@@ -133,14 +136,12 @@ def login(
         verify_expiry=verify_expiry,
         gpg_home=gpg_home,
     )
-    return
 
 
 @task()
 def logout(c: Context) -> None:
     """Clear local Passbolt session/token."""
     Passbolt.clear_session()
-    return
 
 
 @task(

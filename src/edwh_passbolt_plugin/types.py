@@ -37,7 +37,7 @@ class ResourceRecord(t.TypedDict, total=False):
     expired: str | None
     folder_parent_id: str | None
     personal: bool
-    permissions: list["PermissionRecord"]
+    permissions: list[PermissionRecord]
     decrypted_metadata: dict[str, t.Any] | None
 
 
@@ -46,8 +46,8 @@ class PermissionRecord(t.TypedDict, total=False):
     aro: str
     aro_foreign_key: str
     type: int
-    user: "UserRecord"
-    group: "GroupRecord"
+    user: UserRecord
+    group: GroupRecord
 
 
 class UserProfileRecord(t.TypedDict, total=False):
@@ -61,7 +61,7 @@ class UserRecord(t.TypedDict, total=False):
     active: bool
     deleted: bool
     profile: UserProfileRecord
-    gpgkey: "GpgKeyRecord"
+    gpgkey: GpgKeyRecord
 
 
 class FolderRecord(t.TypedDict, total=False):
