@@ -2,6 +2,14 @@
 
 <!--next-version-placeholder-->
 
+## v0.3.0 (2026-08-20)
+
+### Feature
+* **passbolt:** support unattended sessions and folder resolution
+
+### Fix
+* **httpx:** replaced httpx with requests (#3)
+
 ## v0.2.0 (2026-05-12)
 
 ### Feature
