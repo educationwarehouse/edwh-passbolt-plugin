@@ -1,4 +1,6 @@
 # SPDX-FileCopyrightText: 2026-present Education Warehouse <info@educationwarehouse.nl>
 #
 # SPDX-License-Identifier: MIT
-__version__ = "0.2.0"
+from importlib.metadata import version
+
+__version__ = version("edwh-passbolt-plugin")
