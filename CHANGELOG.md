@@ -2,6 +2,11 @@
 
 <!--next-version-placeholder-->
 
+## v0.4.0 (2026-08-20)
+
+### Feature
+* **passbolt:** add standalone note commands
+
 ## v0.3.0 (2026-08-20)
 
 ### Feature
