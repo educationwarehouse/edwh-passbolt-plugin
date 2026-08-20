@@ -1287,6 +1287,11 @@ class Passbolt:
         if not secret_data:
             raise RuntimeError("No secret data available for this resource.")
         decrypted = self.decrypt_secret(secret_data)
+        resource_type = self.resource_types.get(resource["resource_type_id"]) or {}
+        if resource_type.get("slug") == "v5-note":
+            if isinstance(decrypted, dict) and "description" in decrypted:
+                return str(decrypted["description"] or "")
+            raise RuntimeError("Unable to read note content.")
         if isinstance(decrypted, dict) and "password" in decrypted:
             return str(decrypted.get("password") or "")
         if isinstance(decrypted, dict) and "totp" in decrypted:
@@ -1318,6 +1323,130 @@ class Passbolt:
             uri=uri,
             folder=folder,
         )
+
+    def set_note(
+        self,
+        title: str,
+        content: str,
+        folder: str | None = None,
+    ) -> str:
+        """Create or update a standalone note resource."""
+        resource = self.resolve_resource(title)
+        if resource:
+            return self.update_note(resource["id"], content, folder=folder)
+        return self.create_note(title, content, folder=folder)
+
+    def _standalone_note_resource_type(self) -> ResourceTypeRecord:
+        for resource_type in self.resource_types.values():
+            if resource_type.get("slug") == "v5-note":
+                return resource_type
+
+        raise RuntimeError("This Passbolt server does not support standalone notes.")
+
+    def _resolve_note_resource(self, name_or_id: str) -> ResourceRecord:
+        resource = self.resolve_resource(name_or_id)
+        if not resource:
+            raise RuntimeError(f"Resource not found: {name_or_id}")
+        resource_type = self.resource_types.get(resource["resource_type_id"]) or {}
+        if resource_type.get("slug") != "v5-note":
+            raise RuntimeError(f"Resource is not a standalone note: {name_or_id}")
+        return resource
+
+    def _resolve_folder_id(self, folder: str | None) -> str | None:
+        if not folder:
+            return None
+        resolved_folder = self.resolve_folder(folder)
+        if not resolved_folder or not resolved_folder.get("id"):
+            raise RuntimeError(f"Folder not found: {folder}")
+        return str(resolved_folder["id"])
+
+    def create_note(
+        self,
+        title: str,
+        content: str,
+        folder: str | None = None,
+    ) -> str:
+        """Create a standalone note resource."""
+        metadata_keys = self.load_metadata_keys()
+        if not metadata_keys:
+            raise RuntimeError("No metadata keys available for creation.")
+
+        resource_type = self._standalone_note_resource_type()
+        metadata_key_id = next(iter(metadata_keys.keys()))
+        metadata_key_type = "shared_key"
+        metadata = self._build_v5_metadata(
+            name=title,
+            username=None,
+            uri=None,
+            description=None,
+            resource_type_id=resource_type["id"],
+        )
+        encrypted_metadata = self.encrypt_metadata(
+            metadata,
+            metadata_key_id,
+            metadata_key_type,
+            metadata_keys,
+        )
+        secret_data = {
+            "object_type": "PASSBOLT_SECRET_DATA",
+            "description": content,
+        }
+        encrypted_secret = self.encrypt_secret(secret_data)
+        payload: dict[str, t.Any] = {
+            "metadata": encrypted_metadata,
+            "metadata_key_id": metadata_key_id,
+            "metadata_key_type": metadata_key_type,
+            "resource_type_id": resource_type["id"],
+            "secrets": [
+                {"data": encrypted_secret, "user_id": self.session_info.get("user_id")}
+            ],
+        }
+        folder_id = self._resolve_folder_id(folder)
+        if folder_id:
+            payload["folder_parent_id"] = folder_id
+        created = self.api_post("/resources.json", payload=payload)
+        body = created.get("body") or {}
+        return str(body.get("id") or "")
+
+    def update_note(
+        self,
+        name_or_id: str,
+        content: str,
+        folder: str | None = None,
+    ) -> str:
+        """Update an existing standalone note resource."""
+        resource = self._resolve_note_resource(name_or_id)
+
+        secret = self.get_secret(resource["id"])
+        secret_id = secret.get("id")
+        if not secret_id:
+            raise RuntimeError("Unable to determine secret id for update.")
+
+        existing_secret = (
+            self.decrypt_secret(secret["data"]) if secret.get("data") else {}
+        )
+        secret_payload = existing_secret if isinstance(existing_secret, dict) else {}
+        secret_payload["object_type"] = "PASSBOLT_SECRET_DATA"
+        secret_payload["description"] = content
+
+        payload: dict[str, t.Any] = {
+            "metadata": resource["metadata"],
+            "metadata_key_id": resource["metadata_key_id"],
+            "metadata_key_type": resource["metadata_key_type"],
+            "resource_type_id": resource["resource_type_id"],
+            "secrets": [
+                {
+                    "id": secret_id,
+                    "data": self.encrypt_secret(secret_payload),
+                    "user_id": self.session_info.get("user_id"),
+                }
+            ],
+        }
+        folder_id = self._resolve_folder_id(folder)
+        if folder_id:
+            payload["folder_parent_id"] = folder_id
+        self.api_put(f"/resources/{resource['id']}.json", payload=payload)
+        return str(resource["id"])
 
     def create_password(
         self,

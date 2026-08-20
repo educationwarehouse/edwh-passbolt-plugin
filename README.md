@@ -51,12 +51,25 @@ Main commands:
 edwh passbolt.list [--folder ...]
 edwh passbolt.get <name-or-id> [--field password|user|uri]
 edwh passbolt.set [--name ...] [--password ...] [--username ...] [--uri ...] [--folder ...]
+edwh passbolt.set-note --title ... [--content ...] [--folder ...]
 edwh passbolt.search <term> [--limit 10] [--threshold 70]
 edwh passbolt.list-folders
 edwh passbolt.delete <name-or-id>
 edwh passbolt.share <name-or-id> [--user "Alice, Bob"] [--group "Admins"] [--permission read|update|owner]
 edwh passbolt.unshare <name-or-id> [--user "Alice, Bob"] [--group "Admins"]
 ```
+
+`passbolt.set-note` creates a note when the title does not exist and updates it
+otherwise. It also has `passbolt.add-note` and `passbolt.update-note` aliases.
+When content is piped in, it is read from stdin unchanged:
+
+```console
+cat .env | edwh passbolt.set-note --title "Development environment" --folder Development
+```
+
+Notes use the same `passbolt.get`, `passbolt.delete`, `passbolt.share`, and
+`passbolt.unshare` commands as passwords. `passbolt.get` prints only the note
+content for a note resource.
 
 For full command listings and help text:
 

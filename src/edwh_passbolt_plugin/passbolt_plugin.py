@@ -311,6 +311,41 @@ def set_password(
 
 
 @task(
+    help={
+        "title": "Note title or ID",
+        "content": "Note content (reads stdin when piped)",
+        "folder": "Folder name or ID (optional)",
+    },
+    pre=[ensure_logged_in],
+    name="set-note",
+    aliases=("add-note", "update-note"),
+)
+def set_note(
+    _: Context,
+    title: str | None = None,
+    content: str | None = None,
+    folder: str | None = None,
+) -> None:
+    """Create or update a standalone note entry."""
+    if not title:
+        title = _prompt("Note title or ID")
+
+    if content is None and not sys.stdin.isatty():
+        content = sys.stdin.read()
+    if content is None:
+        content = _prompt("Note content")
+    if not content:
+        raise RuntimeError("Note content is required.")
+
+    client = Passbolt.from_session()
+    resource_id = with_spinner(
+        lambda: client.set_note(str(title), content, folder=folder),
+        text="Saving note...",
+    )
+    print(resource_id)
+
+
+@task(
     help={"name": "Entry name or ID"},
     pre=[ensure_logged_in],
     name="delete",
