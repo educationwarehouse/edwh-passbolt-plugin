@@ -10,12 +10,12 @@ import tempfile
 import time
 import typing as t
 import uuid
-from functools import cache, cached_property
+from functools import cached_property
 from getpass import getpass
 from pathlib import Path
 
+import httpx2
 import pyotp
-import requests
 from rapidfuzz import fuzz, process
 
 from .types import (
@@ -80,6 +80,11 @@ LOGGER = _configure_logging()
 def _session_path() -> Path:
     config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
     return config_root / "edwh" / "passbolt" / "session.json"
+
+
+def _gpg_passphrase() -> str | None:
+    """Return the optional passphrase used for unattended GPG operations."""
+    return os.environ.get("PASSBOLT_GPG_PASSPHRASE") or None
 
 
 def _load_session() -> SessionData | None:
@@ -189,20 +194,20 @@ class Passbolt:
         base_url: str,
         gpg_home: str | None = None,
     ) -> None:
-        self.timeout = 30.0
         self.base_url = base_url.rstrip("/")
-        self._client = requests.Client()
+        self._client = httpx2.Client(timeout=30.0)
         self._gpg_home = gpg_home
         self._session_tokens: Tokens | None = None
         self._session_info: SessionData | None = None
 
     @classmethod
-    def from_session(cls) -> "Passbolt":
+    def from_session(cls) -> Passbolt:
         """Build a client using cached session credentials."""
         session = _load_session()
         if not session:
             raise RuntimeError(
-                "Not logged in. Set PASSBOLT_ACCESS_TOKEN or run `edwh passbolt.login` first.",
+                "Not logged in. Set PASSBOLT_GPG_PASSPHRASE to unlock an existing "
+                "session, or run `edwh passbolt.login` first.",
             )
 
         encrypted = session.get("encrypted_tokens")
@@ -215,7 +220,11 @@ class Passbolt:
             raise RuntimeError("Session is missing host. Please re-login.")
         client = cls(host, gpg_home=session.get("gpg_home"))
         client._session_info = session
-        client._session_tokens = _decrypt_tokens(encrypted, session.get("gpg_home"))
+        client._session_tokens = _decrypt_tokens(
+            encrypted,
+            session.get("gpg_home"),
+            passphrase=_gpg_passphrase(),
+        )
         return client
 
     @classmethod
@@ -228,7 +237,7 @@ class Passbolt:
         passphrase: str | None,
         verify_expiry: int,
         gpg_home: str | None = None,
-    ) -> "Passbolt":
+    ) -> Passbolt:
         """Login with GPG key material and persist a local session."""
         client = cls(host, gpg_home=gpg_home)
         tokens = client.login_jwt(user_id, import_key, passphrase, verify_expiry)
@@ -315,9 +324,8 @@ class Passbolt:
         )
         self._session_info = _load_session()
         if warm_agent:
-            encrypted = (
-                _load_session().get("encrypted_tokens") if _load_session() else None
-            )
+            session = _load_session()
+            encrypted = session.get("encrypted_tokens") if session else None
             if encrypted:
                 try:
                     _gpg_decrypt_interactive(encrypted, self._gpg_home)
@@ -357,7 +365,10 @@ class Passbolt:
                 f"[request] method={method} url={url} payload={payload} headers={request_headers}",
             )
             resp = self._client.request(
-                method, url, json=payload, headers=request_headers, timeout=self.timeout
+                method,
+                url,
+                json=payload,
+                headers=request_headers,
             )
 
             resp.raise_for_status()
@@ -365,11 +376,11 @@ class Passbolt:
             LOGGER.debug(f"[response] status={resp.status_code} data={data}")
             return data
 
-        except requests.HTTPStatusError as exc:
+        except httpx2.HTTPStatusError as exc:
             raise RuntimeError(
                 f"HTTP {exc.response.status_code} from {url}: {exc.response.text}",
             ) from exc
-        except requests.RequestError as exc:
+        except httpx2.RequestError as exc:
             raise RuntimeError(f"Network error calling {url}: {exc}") from exc
 
     @property
@@ -445,7 +456,6 @@ class Passbolt:
         """Return the GNUPGHOME directory used for GPG operations."""
         return self._gpg_home or _default_gpg_home()
 
-    @cache
     def load_metadata_keys(self) -> dict[str, MetadataKeyRecord]:
         """Load available metadata keys for encrypting/decrypting metadata."""
         params = {
@@ -533,15 +543,14 @@ class Passbolt:
         metadata_keys: dict[str, MetadataKeyRecord],
     ) -> dict[str, t.Any]:
         """Decrypt resource/folder metadata using the correct key."""
-        if metadata_key_type != "user_key":
-            if metadata_key_id not in metadata_keys:
-                LOGGER.debug(
-                    "Metadata key missing. "
-                    f"requested={metadata_key_id} "
-                    f"type={metadata_key_type} "
-                    f"available={list(metadata_keys.keys())}",
-                )
-                raise RuntimeError(f"Metadata key {metadata_key_id} not available.")
+        if metadata_key_type != "user_key" and metadata_key_id not in metadata_keys:
+            LOGGER.debug(
+                "Metadata key missing. "
+                f"requested={metadata_key_id} "
+                f"type={metadata_key_type} "
+                f"available={list(metadata_keys.keys())}",
+            )
+            raise RuntimeError(f"Metadata key {metadata_key_id} not available.")
         raw = _gpg_decrypt_interactive(encrypted, self.gpg_home())
         try:
             return json.loads(raw)
@@ -550,7 +559,7 @@ class Passbolt:
 
     def _try_decrypt_metadata(
         self,
-        record: dict[str, t.Any],
+        record: t.Mapping[str, t.Any],
         metadata_keys: dict[str, MetadataKeyRecord],
     ) -> dict[str, t.Any] | None:
         metadata = record.get("metadata")
@@ -620,7 +629,6 @@ class Passbolt:
             raw = str(secret_value)
         return _gpg_encrypt(raw, user_fingerprint, self.gpg_home())
 
-    @cache
     def list_resources(
         self, *, include_permissions: bool = False
     ) -> list[ResourceRecord]:
@@ -697,7 +705,6 @@ class Passbolt:
             return next(iter(resource_types.values()))
         raise RuntimeError("No resource types available.")
 
-    @cache
     def get_all_decrypted_resources(
         self, include_permissions: bool = False
     ) -> list[ResourceRecord]:
@@ -711,15 +718,24 @@ class Passbolt:
             )
         return resources
 
-    @cache
-    def get_all_decrypted_folders(self) -> FolderRecord | None:
+    def get_all_decrypted_folders(self) -> list[FolderRecord]:
+        """Return all folders with decrypted metadata when available."""
         folders = self.list_folders()
         metadata_keys = self.load_metadata_keys()
         for folder in folders:
             folder["decrypted_metadata"] = self._try_decrypt_metadata(
-                folders, metadata_keys
+                folder, metadata_keys
             )
-            return folder
+        return folders
+
+    def resolve_folder(self, name_or_id: str) -> FolderRecord | None:
+        """Resolve a folder by id, plain name, or decrypted metadata name."""
+        for folder in self.get_all_decrypted_folders():
+            if folder.get("id") == name_or_id or folder.get("name") == name_or_id:
+                return folder
+            metadata = folder.get("decrypted_metadata")
+            if metadata and metadata.get("name") == name_or_id:
+                return folder
         return None
 
     def resolve_resource(self, name_or_id: str) -> ResourceRecord | None:
@@ -874,15 +890,13 @@ class Passbolt:
         choices: dict[str, PasswordEntry] = {}
         for entry in entries:
             label = " | ".join(
-                (
-                    part
-                    for part in (
-                        str(entry.get("name") or "").strip(),
-                        str(entry.get("username") or "").strip(),
-                        str(entry.get("uri") or "").strip(),
-                    )
-                    if part
+                part
+                for part in (
+                    str(entry.get("name") or "").strip(),
+                    str(entry.get("username") or "").strip(),
+                    str(entry.get("uri") or "").strip(),
                 )
+                if part
             ).strip()
             if not label:
                 continue
@@ -1245,9 +1259,9 @@ class Passbolt:
             aro_id = str(perm.get("aro_foreign_key") or "")
             if not aro_id:
                 continue
-            if aro == "user" and aro_id in target_user_ids:
-                permission_ids.add(perm_id)
-            elif aro == "group" and aro_id in target_group_ids:
+            if (aro == "user" and aro_id in target_user_ids) or (
+                aro == "group" and aro_id in target_group_ids
+            ):
                 permission_ids.add(perm_id)
 
         if not permission_ids:
@@ -1343,7 +1357,7 @@ class Passbolt:
 
         preferred_folder_parent_id: str | None = None
         if folder:
-            resolved_folder = self.get_all_decrypted_folders(folder)
+            resolved_folder = self.resolve_folder(folder)
             if not resolved_folder or not resolved_folder.get("id"):
                 raise RuntimeError(f"Folder not found: {folder}")
             preferred_folder_parent_id = resolved_folder.get("id")
@@ -1619,8 +1633,7 @@ def _run_gpg(
     proc = subprocess.run(
         ["gpg", "--batch", "--yes", *args],
         input=input_data.encode("utf-8"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env=_gpg_env(gpg_home),
         check=False,
     )
@@ -1710,6 +1723,7 @@ def _gpg_encrypt_signed(
     recipient: str,
     signer: str,
     gpg_home: str | None,
+    passphrase: str | None = None,
 ) -> str:
     return _run_gpg(
         [
@@ -1725,6 +1739,7 @@ def _gpg_encrypt_signed(
         ],
         message,
         gpg_home,
+        passphrase=passphrase or _gpg_passphrase(),
     )
 
 
@@ -1755,8 +1770,7 @@ def _run_gpg_interactive(
             proc = subprocess.run(
                 cmd,
                 input=(passphrase or "").encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 env=_gpg_env(gpg_home),
                 check=False,
             )
@@ -1764,8 +1778,7 @@ def _run_gpg_interactive(
         proc = subprocess.run(
             ["gpg", "--yes", *args],
             input=input_data.encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             env=_gpg_env(gpg_home),
             check=False,
         )
@@ -1785,6 +1798,9 @@ def _run_gpg_interactive(
 
 
 def _gpg_decrypt_interactive(message: str, gpg_home: str | None) -> str:
+    if passphrase := _gpg_passphrase():
+        return _gpg_decrypt(message, gpg_home, passphrase=passphrase)
+
     try:
         # First try a silent decrypt: no pinentry, no prompt.
         return _run_gpg_interactive(

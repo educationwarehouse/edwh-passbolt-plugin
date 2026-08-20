@@ -41,6 +41,10 @@ You will be prompted for:
 After login, your OS may occasionally show a passphrase prompt popup (via `gpg-agent`/`pinentry`). 
 This depends on your system and the GPG Agent cache/expiry time.
 
+For unattended commands, first create the local session with `edwh passbolt.login`,
+then set `PASSBOLT_GPG_PASSPHRASE` to the passphrase for that session's GPG key.
+The plugin uses it to unlock the encrypted session and perform required GPG operations.
+
 Main commands:
 
 ```console
