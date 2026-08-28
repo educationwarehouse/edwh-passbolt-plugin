@@ -2,6 +2,11 @@
 
 <!--next-version-placeholder-->
 
+## v0.4.1 (2026-08-28)
+
+### Fix
+* support `-p <passphrase>` or `PASSBOLT_GPG_PASSPHRASE` for `passbolt.login`
+
 ## v0.4.0 (2026-08-20)
 
 ### Feature
