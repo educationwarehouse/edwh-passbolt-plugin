@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 import typing as t
 from getpass import getpass
@@ -112,7 +113,7 @@ def login(
     """Authenticate against Passbolt and cache a session/token locally."""
     if not force:
         with contextlib.suppress(Exception):
-            Passbolt.validate_session()
+            Passbolt.validate_session(passphrase=passphrase)
             answer = _prompt("A valid session exists. Re-login? (y/N)", "N").lower()
             if answer not in {"y", "yes"}:
                 return
@@ -120,7 +121,9 @@ def login(
     if not any([host, user_id, import_key, passphrase]):
         host, user_id, import_key, passphrase = _prompt_login_inputs()
     if passphrase is None:
-        passphrase = getpass("Passbolt/GPG passphrase: ").strip() or None
+        passphrase = os.environ.get("PASSBOLT_GPG_PASSPHRASE") or (
+            getpass("Passbolt/GPG passphrase: ").strip() or None
+        )
 
     if not host or not user_id:
         raise RuntimeError("Host and user_id are required.")

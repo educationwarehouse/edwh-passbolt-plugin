@@ -201,7 +201,7 @@ class Passbolt:
         self._session_info: SessionData | None = None
 
     @classmethod
-    def from_session(cls) -> Passbolt:
+    def from_session(cls, passphrase: str | None = None) -> Passbolt:
         """Build a client using cached session credentials."""
         session = _load_session()
         if not session:
@@ -223,7 +223,7 @@ class Passbolt:
         client._session_tokens = _decrypt_tokens(
             encrypted,
             session.get("gpg_home"),
-            passphrase=_gpg_passphrase(),
+            passphrase=passphrase if passphrase is not None else _gpg_passphrase(),
         )
         return client
 
@@ -251,9 +251,13 @@ class Passbolt:
         return client
 
     @classmethod
-    def validate_session(cls, verify_remote: bool = True) -> SessionValidation:
+    def validate_session(
+        cls,
+        verify_remote: bool = True,
+        passphrase: str | None = None,
+    ) -> SessionValidation:
         """Validate cached tokens and optionally verify against the server."""
-        client = cls.from_session()
+        client = cls.from_session(passphrase=passphrase)
         session = _load_session()
         tokens = client._session_tokens
         if not session or not tokens:
