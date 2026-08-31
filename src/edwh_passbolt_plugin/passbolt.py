@@ -655,6 +655,7 @@ class Passbolt:
         params = {
             "contain[permissions]": 1,
             "contain[permissions.user.profile]": 1,
+            "contain[permissions.user.gpgkey]": 1,
             "contain[permissions.group]": 1,
         }
         data = self.api_get(f"/resources/{resource_id}.json", params=params)
@@ -1043,6 +1044,70 @@ class Passbolt:
         else:
             raw = str(secret_value)
         return _gpg_encrypt(raw, fingerprint, self.gpg_home())
+
+    def _replacement_secrets_payload(
+        self,
+        resource_id: str,
+        secret_id: str,
+        secret_value: t.Any,
+    ) -> list[dict[str, t.Any]]:
+        """Encrypt a replacement secret for every user with resource access."""
+        resource = self.get_resource_with_permissions(resource_id)
+        permissions = t.cast(
+            list[PermissionRecord],
+            resource.get("permissions") or [],
+        )
+        current_user_id = str(self.session_info.get("user_id") or "")
+        if not current_user_id:
+            raise RuntimeError("Session missing user_id. Please re-login.")
+
+        users: dict[str, UserRecord] = {}
+
+        def add_user(user: UserRecord) -> None:
+            user_id = str(user.get("id") or "")
+            if user_id:
+                users[user_id] = user
+
+        for permission in permissions:
+            aro = str(permission.get("aro") or "").lower()
+            if aro == "user":
+                add_user(t.cast(UserRecord, permission.get("user") or {}))
+            elif aro == "group":
+                group_id = str(permission.get("aro_foreign_key") or "")
+                if not group_id:
+                    continue
+                group = self.get_group_with_users(group_id)
+                for group_user in group.get("groups_users") or []:
+                    add_user(t.cast(UserRecord, group_user.get("user") or {}))
+
+        users.setdefault(current_user_id, {"id": current_user_id})
+        secrets_payload: list[dict[str, t.Any]] = []
+        for user_id, user in users.items():
+            if user_id == current_user_id:
+                encrypted_secret = self.encrypt_secret(secret_value)
+                secrets_payload.append(
+                    {"id": secret_id, "data": encrypted_secret, "user_id": user_id},
+                )
+                continue
+
+            gpgkey = user.get("gpgkey") or {}
+            armored = gpgkey.get("armored_key")
+            fingerprint = gpgkey.get("fingerprint")
+            if armored:
+                _gpg_import(str(armored), self.gpg_home())
+            if not fingerprint:
+                raise RuntimeError(
+                    f"Missing gpg key fingerprint for user: {user.get('username')}",
+                )
+            secrets_payload.append(
+                {
+                    "user_id": user_id,
+                    "data": self.encrypt_secret_for_fingerprint(
+                        secret_value, str(fingerprint)
+                    ),
+                },
+            )
+        return secrets_payload
 
     def share_resource(
         self,
@@ -1438,13 +1503,11 @@ class Passbolt:
             "metadata_key_id": resource["metadata_key_id"],
             "metadata_key_type": resource["metadata_key_type"],
             "resource_type_id": resource["resource_type_id"],
-            "secrets": [
-                {
-                    "id": secret_id,
-                    "data": self.encrypt_secret(secret_payload),
-                    "user_id": self.session_info.get("user_id"),
-                }
-            ],
+            "secrets": self._replacement_secrets_payload(
+                resource["id"],
+                str(secret_id),
+                secret_payload,
+            ),
         }
         folder_id = self._resolve_folder_id(folder)
         if folder_id:
@@ -1581,18 +1644,16 @@ class Passbolt:
         else:
             secret_payload = password
 
-        encrypted_secret = self.encrypt_secret(secret_payload)
-        session = self.session_info
-        user_id = session.get("user_id")
-
         payload = {
             "metadata": encrypted_metadata,
             "metadata_key_id": resource["metadata_key_id"],
             "metadata_key_type": resource["metadata_key_type"],
             "resource_type_id": resource["resource_type_id"],
-            "secrets": [
-                {"id": secret_id, "data": encrypted_secret, "user_id": user_id}
-            ],
+            "secrets": self._replacement_secrets_payload(
+                resource["id"],
+                str(secret_id),
+                secret_payload,
+            ),
         }
         self.api_put(f"/resources/{resource['id']}.json", payload=payload)
         return str(resource["id"])
