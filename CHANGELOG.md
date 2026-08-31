@@ -2,6 +2,11 @@
 
 <!--next-version-placeholder-->
 
+## v0.4.2 (2026-08-31)
+
+### Fix
+* **resources:** include secrets for all users with access
+
 ## v0.4.1 (2026-08-28)
 
 ### Fix
