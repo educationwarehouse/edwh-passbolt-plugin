@@ -28,7 +28,7 @@ dependencies = [
     "httpx2",
     "rapidfuzz",
     "rich",
-    "threadful",
+    "threadful >= 0.6, < 1",
     "pyotp",
 ]
 version = "0.4.2"
