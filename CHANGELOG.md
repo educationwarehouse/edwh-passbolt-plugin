@@ -2,6 +2,11 @@
 
 <!--next-version-placeholder-->
 
+## v0.4.3 (2026-09-04)
+
+### Fix
+* bump threadful for better ci output
+
 ## v0.4.2 (2026-08-31)
 
 ### Fix
